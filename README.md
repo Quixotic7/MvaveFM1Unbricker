@@ -165,6 +165,29 @@ Then unplug, switch off, wait 5 s, switch on.
 
 ## Troubleshooting
 
+### The FM-1 does not show up as "WL82 UBOOT1.00" at all
+
+The chip only exposes the UBOOT disk once it has fallen back to ROM boot. A black screen alone
+does not mean it has. In order, with the FM-1 plugged straight into the PC (no hub) with a cable
+known to carry data:
+
+1. **Look everywhere, not only at disk drives.** In PowerShell:
+   `Get-PnpDevice | Where-Object { $_.InstanceId -like '*VID_4C4A*' } | Format-Table Status, Class, FriendlyName`
+   (the JieLi vendor id is 4C4A; the ROM boot disk is PID 8057). A device listed with an error
+   status still counts: note it. On Linux: `lsusb | grep -i 4c4a` and `dmesg | tail`.
+2. **Leave it switched on for two full minutes.** Felucca-family firmware arms a watchdog and a
+   boot-loop guard: a firmware that hangs or crashes at boot is reset by the watchdog, and after
+   two failed boots in a row the guard itself enters ROM boot. Then check again.
+3. **The update-mode hold.** Switch the FM-1 off. Hold OCT- and OCT+ together, switch it on, and
+   keep holding for 10 seconds. If the firmware reaches its main loop at all, this enters update
+   mode (the screen may stay black). Check again.
+4. **Three quick restarts.** Switch on, wait 10 s, off; on, wait 10 s, off; on. If each boot was
+   a crash, the third one lands in ROM boot. (This is also how a unit can get there by accident.)
+5. If after all that nothing with vendor id 4C4A ever appears, the chip is not reaching ROM boot
+   over USB and this tool cannot help. The hardware route is the
+   [FM-1 Transporter](https://github.com/kurogedelic/FM-1-transporter).
+
+
 - **"No WL82 UBOOT1.00 device found"**: switch the FM-1 on, use a data cable, plug in directly.
   Windows: run from an administrator PowerShell. Linux: `sudo modprobe sg`, run with `sudo`.
   Check `Get-CimInstance Win32_DiskDrive` / `lsscsi -g`. jl-uboot-tool's own `jldevfind.py`
