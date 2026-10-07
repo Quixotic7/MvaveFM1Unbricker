@@ -17,6 +17,7 @@ import os
 import random
 import subprocess
 import sys
+import struct
 import tempfile
 import types
 import unittest
@@ -54,6 +55,34 @@ def make_fwsc(identity: str, image: bytes) -> bytes:
     return bytes(out)
 
 
+def make_ufw(flash: bytes, ota: bytes = b"OTA" * 100) -> bytes:
+    """Logical image laid out as ChoralRootFM1/tools/fm1pkg_make.py ufw() writes it:
+    ciphered 0x40-byte header + ciphered 0x50-byte entries, flash.bin data at 0x400."""
+    files = [(0, b"flash.bin", flash), (100, b"ota.bin", ota)]
+    off, ents = 0x400, []
+    for i, (typ, name, d) in enumerate(files):
+        off = (off + 0xFF) & ~0xFF
+        e = bytearray(0x50)
+        struct.pack_into("<HHHHIII", e, 0, typ, i, fu._crc16(d), 0, off, len(d),
+                         (len(d) + 31) & ~31)
+        e[0x40:0x40 + len(name)] = name
+        ents.append((e, off, d))
+        off += len(d)
+    hdr = bytearray(0x40)
+    struct.pack_into("<IH", hdr, 4, off, len(files))
+    struct.pack_into("<HHH", hdr, 10, 0x0004, 0x0200, 0)
+    hdr[16:22] = b"AC791N"
+    lst = b"".join(fu._jl_enc(e) for e, _, _ in ents)
+    struct.pack_into("<H", hdr, 2, fu._crc16(lst))
+    struct.pack_into("<H", hdr, 0, fu._crc16(hdr[2:0x40]))
+    logical = bytearray(b"\xFF" * off)
+    logical[0:0x40] = fu._jl_enc(hdr)
+    logical[0x40:0x40 + len(lst)] = lst
+    for _, o, d in ents:
+        logical[o:o + len(d)] = d
+    return bytes(logical)
+
+
 def random_image(seed, length=0x94000):
     rnd = random.Random(seed)
     return rnd.randbytes(length)
@@ -77,9 +106,9 @@ class Workdir(unittest.TestCase):
         self._tmp.cleanup()
 
     def package(self, identity="FM-1_920", seed=1, name="pkg.fwsc"):
-        image = random_image(seed)
+        image = random_image(seed)          # the flash.bin (flash address 0 = image[0])
         path = self.tmp / name
-        path.write_bytes(make_fwsc(identity, image))
+        path.write_bytes(make_fwsc(identity, make_ufw(image)))
         return path, image
 
     def device(self, **kw):
@@ -110,8 +139,30 @@ class FwscTests(unittest.TestCase):
         with self.assertRaises(fu.UnbrickError):
             fu.Package(Path("short.fwsc"), short)
 
+    def test_ufw_flash_bin_found(self):
+        flash = random_image(11)
+        pkg = fu.Package(Path("p.fwsc"), make_fwsc("FM-1_920", make_ufw(flash)))
+        self.assertEqual(pkg.fl_off, 0x400)
+        self.assertEqual(pkg.flash[:16], flash[:16])
+        self.assertEqual(pkg.head, flash[:0x4000])
+        self.assertEqual(pkg.firmware, flash[0x4000:0x93000])
+
+    def test_corrupted_ufw_refused(self):
+        logical = bytearray(make_ufw(random_image(12)))
+        logical[0x40 + 0x50 + 5] ^= 0x01            # entry list
+        with self.assertRaises(fu.UnbrickError):
+            fu.Package(Path("p.fwsc"), make_fwsc("FM-1_920", bytes(logical)))
+        logical = bytearray(make_ufw(random_image(12)))
+        logical[0x20] ^= 0x01                        # header
+        with self.assertRaises(fu.UnbrickError):
+            fu.Package(Path("p.fwsc"), make_fwsc("FM-1_920", bytes(logical)))
+        with self.assertRaises(fu.UnbrickError):     # flash.bin shorter than FW_END
+            fu.Package(Path("p.fwsc"), make_fwsc("FM-1_920", make_ufw(random_image(1, 0x90000))))
+        with self.assertRaises(fu.UnbrickError):     # not a UFW at all
+            fu.Package(Path("p.fwsc"), make_fwsc("FM-1_920", random_image(1)))
+
     def test_classification(self):
-        self.assertEqual(fu.classify("FM-1_015", fu.V15_FW_SHA256)[0], "official-v15")
+        self.assertEqual(fu.classify("FM-1_015", fu.V15_LOGICAL_SHA256)[0], "official-v15")
         self.assertEqual(fu.classify("FM-1_015", "0" * 64)[0], "damaged-v15")
         self.assertEqual(fu.classify("FM-1_920", "0" * 64)[0], "felucca-family")
         self.assertEqual(fu.classify("FM-1_014", "0" * 64)[0], "official-other")
@@ -126,6 +177,9 @@ class FwscTests(unittest.TestCase):
         # Only the first 20 blocks carry a marker byte: the image is exactly 20 bytes shorter.
         self.assertEqual(len(data) - len(pkg.image), fu.FWSC_MARKED_BLOCKS)
         self.assertEqual(pkg.kind, "felucca-family")
+        self.assertEqual(pkg.fl_off, 0x400)
+        self.assertNotEqual(pkg.firmware[:16], b"\xff" * 16)
+        self.assertEqual(pkg.firmware[:16], pkg.image[0x4400:0x4410])
 
     @unittest.skipUnless(ORACLE_FWSC.is_file() and (ORACLE_TOOLS / "fm1_install.py").is_file(),
                          "black-box oracle not available")
@@ -325,6 +379,18 @@ class RestoreTests(Workdir):
         self.assertEqual(fu.main(["restore", str(path), "--yes"], device=dev), 1)
         self.assertEqual(m.reads, 0)
         self.assertIn("NOT match", self.out.getvalue())
+
+    def test_official_v15_restore_writes_flash_relative(self):
+        path, image = self.package(identity="FM-1_015")
+        logical = fu.parse_fwsc(path.read_bytes())[1]
+        with mock.patch.object(fu, "V15_LOGICAL_SHA256",
+                               hashlib.sha256(logical[0x4000:0x93000]).hexdigest()):
+            self.assertEqual(fu.Package.load(path).kind, "official-v15")
+            dev, m = self.device()
+            before = bytes(m.flash)
+            self.assertEqual(fu.main(["restore", str(path), "--yes", "--verify-v15"],
+                                     device=dev), 0)
+        self.check_restored(m, before, image)
 
     def test_unknown_identity_needs_i_know(self):
         path, image = self.package(identity="")

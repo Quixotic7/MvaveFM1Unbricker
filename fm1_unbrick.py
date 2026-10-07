@@ -61,9 +61,13 @@ DEVICE_VENDOR = "WL82"
 DEVICE_PRODUCT = "UBOOT1.00"
 DEVICE_MODEL = "WL82 UBOOT1.00"
 
-# Official M-VAVE V15 firmware region (0x4000..0x92FFF of the logical image).
+# Official M-VAVE V15. V15_LOGICAL_SHA256 is over logical[0x4000:0x93000] of the genuine
+# FM-1.fwsc (NOT the flash region: the flash image starts at the UFW flash.bin offset, 0x400);
+# it only identifies the genuine file. V15_FLASH_FW_SHA256 is the flash.bin region
+# 0x4000..0x92FFF hash.
 V15_IDENTITY = "FM-1_015"
-V15_FW_SHA256 = "6edf3c37fb5bbbc33607c89375ee024d5477c17914d72221c8c68e58a8255686"
+V15_LOGICAL_SHA256 = "6edf3c37fb5bbbc33607c89375ee024d5477c17914d72221c8c68e58a8255686"
+V15_FLASH_FW_SHA256 = None  # the flash.bin region hash: fill in from the genuine FM-1.fwsc (python3 fm1_unbrick.py extract FM-1.fwsc out.bin --verify-v15 prints it)
 
 # .fwsc packaging: the first FWSC_MARKED_BLOCKS blocks of FWSC_BLOCK data
 # bytes are each followed by one marker byte. The markers spell the package
@@ -205,13 +209,75 @@ def parse_fwsc(data: bytes):
     return "".join(chars), bytes(image)
 
 
+def _crc16(data, c=0):
+    """firmware/src/ota.c ota_crc16: poly 0x1021, init 0"""
+    for b in data:
+        c ^= b << 8
+        for _ in range(8):
+            c = ((c << 1) ^ 0x1021) if c & 0x8000 else c << 1
+        c &= 0xFFFF
+    return c
+
+
+def _jl_enc(buf):
+    """firmware/src/ota.c ota_jl_enc: UFW header cipher, key 0xFFFF (its own inverse)"""
+    out, k = bytearray(buf), 0xFFFF
+    for i in range(len(out)):
+        out[i] ^= k & 0xFF
+        k = ((k << 1) ^ (0x1021 if k & 0x8000 else 0)) & 0xFFFF
+    return bytes(out)
+
+
+def _u16(p, o):
+    return p[o] | p[o + 1] << 8
+
+
+def _u32(p, o):
+    return _u16(p, o) | _u16(p, o + 2) << 16
+
+
+def ufw_flash(image: bytes):
+    """Return (fl_off, fl_len) of the UFW type-0 entry (flash.bin) of a logical image.
+
+    Port of firmware/src/ota.c ota_ufw: the 0x40-byte header and the 0x50-byte
+    entries are ciphered; the entry-list CRC is over the still-ciphered entries.
+    Flash address X is logical[fl_off + X].
+    """
+    if len(image) < 0x400:
+        raise UnbrickError("not a UFW package (shorter than its 0x400-byte header)")
+    hdr = _jl_enc(image[:0x40])
+    if _crc16(hdr[2:0x40]) != _u16(hdr, 0):
+        raise UnbrickError("UFW header CRC fails: damaged or not an FM-1 package")
+    nent = _u16(hdr, 8)
+    if nent == 0 or nent > 11:
+        raise UnbrickError("UFW header lists %d entries" % nent)
+    if _crc16(image[0x40:0x40 + nent * 0x50]) != _u16(hdr, 2):
+        raise UnbrickError("UFW entry list CRC fails: damaged package")
+    fl = None
+    for i in range(nent):
+        e = _jl_enc(image[0x40 + i * 0x50:0x90 + i * 0x50])
+        if _u16(e, 0) == 0:
+            fl = (_u32(e, 8), _u32(e, 12))
+    if fl is None:
+        raise UnbrickError("no flash.bin (type 0) entry in the UFW header")
+    off, length = fl
+    if off + length > len(image):
+        raise UnbrickError("flash.bin (0x%X bytes at 0x%X) runs past the package (0x%X bytes)"
+                           % (length, off, len(image)))
+    if length < FW_END:
+        raise UnbrickError("flash.bin is only 0x%X bytes, it must reach 0x%X; this is not a "
+                           "complete FM-1 package" % (length, FW_END))
+    return fl
+
+
 IDENTITY_RE = re.compile(r"^FM-1_(\d{3})$")
 
 
-def classify(identity: str, fw_sha: str):
-    """Return (kind, description) of a package."""
+def classify(identity: str, logical_sha: str):
+    """Return (kind, description) of a package. logical_sha is sha256 of
+    logical[0x4000:0x93000] (identification of the genuine V15 file only)."""
     m = IDENTITY_RE.match(identity)
-    if fw_sha == V15_FW_SHA256:
+    if logical_sha == V15_LOGICAL_SHA256:
         return "official-v15", "official M-VAVE V15 (sha256 verified)"
     if identity == V15_IDENTITY:
         return "damaged-v15", ("claims to be official V15 but the firmware hash does "
@@ -236,11 +302,22 @@ class Package:
             raise UnbrickError(
                 "%s: the flash image is only 0x%X bytes, it must reach 0x%X; "
                 "this is not a complete FM-1 package" % (self.path.name, len(self.image), FW_END))
-        self.head = self.image[:PROTECTED_END]
-        self.firmware = self.image[FW_START:FW_END]
+        try:
+            self.fl_off, self.fl_len = ufw_flash(self.image)
+        except UnbrickError as e:
+            raise UnbrickError("%s: %s" % (self.path.name, e))
+        self.flash = self.image[self.fl_off:self.fl_off + self.fl_len]
+        self.head = self.flash[:PROTECTED_END]
+        self.firmware = self.flash[FW_START:FW_END]
         self.firmware_sha256 = sha256(self.firmware)
         self.head_sha256 = sha256(self.head)
-        self.kind, self.description = classify(self.identity, self.firmware_sha256)
+        # identification only: the slice the V15 hash was originally computed over
+        self.logical_sha256 = sha256(self.image[FW_START:FW_END])
+        self.kind, self.description = classify(self.identity, self.logical_sha256)
+        if (self.kind == "official-v15" and V15_FLASH_FW_SHA256 is not None
+                and self.firmware_sha256 != V15_FLASH_FW_SHA256):
+            self.kind, self.description = "damaged-v15", (
+                "identifies as official V15 but the flash region hash does NOT match")
 
     @classmethod
     def load(cls, path):
@@ -256,7 +333,12 @@ class Package:
         log.info("  file sha256      %s", self.file_sha256)
         log.info("  identity         %s  = %s", self.identity or "(none)", self.description)
         log.info("  firmware region  0x%X..0x%X (0x%X bytes)", FW_START, FW_END - 1, FW_LEN)
+        log.info("  flash.bin        offset 0x%X in the logical image, 0x%X bytes", self.fl_off,
+                 self.fl_len)
         log.info("  firmware sha256  %s", self.firmware_sha256)
+        if self.kind == "official-v15" and V15_FLASH_FW_SHA256 is None:
+            log.info("  (V15 flash-region hash not yet pinned in this tool; the file is "
+                     "identified by its logical hash %s)", V15_LOGICAL_SHA256)
         log.debug("  package head sha256 %s", self.head_sha256)
 
     def check_writable(self, i_know=False):
@@ -265,9 +347,10 @@ class Package:
             raise SafetyError("the firmware region of %s is blank; refusing" % self.path.name)
         if self.kind == "damaged-v15":
             raise SafetyError(
-                "%s says it is official V15 but its firmware hash is %s, not %s. "
+                "%s says it is official V15 but its hash does not match the genuine file "
+                "(logical %s, flash region %s). "
                 "Download FM-1.fwsc again from M-VAVE; refusing to write it."
-                % (self.path.name, self.firmware_sha256, V15_FW_SHA256))
+                % (self.path.name, self.logical_sha256, self.firmware_sha256))
         if self.kind == "unknown":
             if not i_know:
                 raise SafetyError("%s has no recognisable FM-1 identity (%r); refusing "
@@ -877,7 +960,7 @@ def analyse_dump(data: bytes, packages=()):
     log.info("Analysis")
     log.info("  boot head 0x0000..0x3FFF sha256  %s", sha256(head))
     log.info("  firmware  0x4000..0x92FFF sha256 %s", fw_sha)
-    if fw_sha == V15_FW_SHA256:
+    if V15_FLASH_FW_SHA256 is not None and fw_sha == V15_FLASH_FW_SHA256:
         log.info("  firmware region = official M-VAVE V15 (exact)")
     sectors = FW_LEN // SECTOR_SIZE
     blank = sum(1 for i in range(sectors)
@@ -1042,11 +1125,18 @@ def cmd_backup(args, device=None):
 def cmd_extract(args):
     pkg = Package.load(args.package)
     pkg.log_summary()
-    if args.verify_v15 and pkg.firmware_sha256 != V15_FW_SHA256:
-        log.error("NOT the official V15 firmware: expected sha256 %s. Stop here.", V15_FW_SHA256)
+    if args.verify_v15 and pkg.kind != "official-v15":
+        log.error("NOT the official V15 firmware: expected logical sha256 %s%s. Stop here.",
+                  V15_LOGICAL_SHA256, "" if V15_FLASH_FW_SHA256 is None
+                  else " and flash-region sha256 %s" % V15_FLASH_FW_SHA256)
         return EXIT_FAIL
     if args.verify_v15:
-        log.info("V15 hash verified.")
+        log.info("V15 file identified (logical hash verified).")
+        if V15_FLASH_FW_SHA256 is None:
+            log.info("V15 flash-region sha256 %s (not yet pinned in this tool)",
+                     pkg.firmware_sha256)
+        else:
+            log.info("V15 flash-region hash verified.")
     out = Path(args.out)
     out.write_bytes(pkg.firmware)
     log.info("Wrote %s (0x%X bytes); write it at 0x%X only.", out, len(pkg.firmware), FW_START)

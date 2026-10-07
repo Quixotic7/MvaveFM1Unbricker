@@ -37,18 +37,29 @@ copy taken from a firmware package.
 ## 1. Make the file to write
 
 A `.fwsc` package is the flash image with one extra byte after each of its first 20 blocks of
-47 bytes; those 20 bytes spell the package identity. Removing them gives the flash image, and
-`0x4000`-`0x92FFF` of that image is what you write.
+47 bytes; those 20 bytes spell the package identity. Removing them gives the logical image, a JieLi UFW
+container: a ciphered header and entry list in its first `0x400` bytes, then the files. The
+flash image is the package's flash.bin (found through the UFW entry list, at `0x400`), and
+`0x4000`-`0x92FFF` of that flash.bin is what you write.
+
+> **Fixed 2026-10-07.** Versions before this fix took the firmware region from the wrong offset
+> (logical image `0x4000`, instead of the package's flash.bin, which starts at `0x400` in the
+> logical image), so a restore would have written bytes shifted by `0x400`. The V15 hash
+> `6edf3c37…` identifies the genuine `FM-1.fwsc` file; it is not the hash of the region written.
+> The flash-region hash is to be pinned from the genuine file (`extract --verify-v15` prints it).
+
 
 ```sh
 py fm1_unbrick.py extract FM-1.fwsc app_v15.bin --verify-v15        # Windows
 python3 fm1_unbrick.py extract FM-1.fwsc app_v15.bin --verify-v15   # Linux
 ```
 
-(The guide uses u/acrawf1's `fm1_extract_app.py FM-1.fwsc app_v15.bin`; both give the same file.)
+(The original guide uses u/acrawf1's `fm1_extract_app.py FM-1.fwsc app_v15.bin`. Check that its
+output starts with the same bytes as this tool's before using it.)
 
-It must print identity `FM-1_015` and sha256
-`6edf3c37fb5bbbc33607c89375ee024d5477c17914d72221c8c68e58a8255686`.
+It must print identity `FM-1_015` and "V15 file identified" (the genuine file's identification
+hash is `6edf3c37fb5bbbc33607c89375ee024d5477c17914d72221c8c68e58a8255686`, computed over the
+logical image, not over the region written).
 **Any other hash: stop**, the package is damaged or not the genuine V15.
 
 Copy `app_v15.bin` into the jl-uboot-tool folder and open a terminal there.

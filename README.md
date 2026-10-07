@@ -34,8 +34,8 @@ Damage to the boot head (`0x0000`-`0x3FFF`) is not covered either: this tool nev
 `python fm1_unbrick.py restore FM-1.fwsc` runs these steps, and stops at the first problem:
 
 1. **Package**: reads the `.fwsc`, prints its identity (`FM-1_015` = official V15), extracts the
-   firmware region `0x4000..0x92FFF` (`0x8F000` bytes) and checks the official V15 hash
-   `6edf3c37…58a8255686`. A file that says it is V15 but has another hash is refused.
+   firmware region `0x4000..0x92FFF` (`0x8F000` bytes) of the package's flash.bin (found through
+   the UFW entry list) and identifies the genuine V15 file by its hash `6edf3c37…58a8255686`. A file that says it is V15 but has another hash is refused.
 2. **Device**: finds exactly one `WL82 UBOOT1.00` USB disk (it refuses if there are none or
    several), checks that it answers as `WL82`, uploads jl-uboot-tool's wl82 USB loader, and
    requires chip key `0x980F` and flash ID `0x856014`.
@@ -91,9 +91,15 @@ and exits with code 2. Use any Windows PC or Linux machine, a Raspberry Pi is en
 
 Download the FM-1 firmware from M-VAVE's product page:
 <https://www.m-vave.com/product?id=fm-1>. You need the file `FM-1.fwsc` (V15). The tool checks
-it: identity `FM-1_015`, firmware sha256
-`6edf3c37fb5bbbc33607c89375ee024d5477c17914d72221c8c68e58a8255686`. The firmware is
+it: identity `FM-1_015`, file identification sha256
+`6edf3c37fb5bbbc33607c89375ee024d5477c17914d72221c8c68e58a8255686` (over the logical image). The firmware is
 M-VAVE's; this repository does not contain or redistribute it.
+
+> **Fixed 2026-10-07.** Versions before this fix took the firmware region from the wrong offset
+> (logical image `0x4000`, instead of the package's flash.bin, which starts at `0x400` in the
+> logical image), so a restore would have written bytes shifted by `0x400`. The V15 hash
+> `6edf3c37…` identifies the genuine `FM-1.fwsc` file; it is not the hash of the region written.
+> The flash-region hash is to be pinned from the genuine file (`extract --verify-v15` prints it).
 
 ## The 5-minute recipe
 
