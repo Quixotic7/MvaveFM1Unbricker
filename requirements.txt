@@ -1,0 +1,6 @@
+# fm1_unbrick.py needs nothing beyond the Python standard library and
+# jl-uboot-tool's own requirements (crcmod, pyyaml, pycryptodomex, tqdm),
+# which `python fm1_unbrick.py setup` installs from jl-uboot-tool/requirements.txt.
+#
+# Optional, to run the tests with pytest (they also run with plain unittest):
+# pytest

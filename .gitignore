@@ -1,0 +1,11 @@
+backups/
+logs/
+jl-uboot-tool/
+jl-uboot-tool.tmp/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.DS_Store
+*.bin
+*.fwsc
