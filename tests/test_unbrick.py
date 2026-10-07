@@ -32,6 +32,8 @@ import fm1_unbrick as fu  # noqa: E402
 PROJECTS = ROOT.parent
 ORACLE_FWSC = Path(os.environ.get(
     "FM1_ORACLE_FWSC", PROJECTS / "ChoralRootFM1" / "build" / "choralroot.fwsc"))
+V15_FWSC = Path(os.environ.get(
+    "FM1_V15_FWSC", PROJECTS / "MVaveOfficial" / "V15-FM-1.fwsc"))
 ORACLE_TOOLS = Path(os.environ.get(
     "FM1_ORACLE_TOOLS", PROJECTS / "ChoralRootFM1" / "tools"))
 JLUB_DIR = Path(os.environ.get("FM1_JLUB_DIR", ROOT / "jl-uboot-tool"))
@@ -162,7 +164,7 @@ class FwscTests(unittest.TestCase):
             fu.Package(Path("p.fwsc"), make_fwsc("FM-1_920", random_image(1)))
 
     def test_classification(self):
-        self.assertEqual(fu.classify("FM-1_015", fu.V15_LOGICAL_SHA256)[0], "official-v15")
+        self.assertEqual(fu.classify("FM-1_015", fu.V15_FLASH_FW_SHA256)[0], "official-v15")
         self.assertEqual(fu.classify("FM-1_015", "0" * 64)[0], "damaged-v15")
         self.assertEqual(fu.classify("FM-1_920", "0" * 64)[0], "felucca-family")
         self.assertEqual(fu.classify("FM-1_014", "0" * 64)[0], "official-other")
@@ -382,15 +384,22 @@ class RestoreTests(Workdir):
 
     def test_official_v15_restore_writes_flash_relative(self):
         path, image = self.package(identity="FM-1_015")
-        logical = fu.parse_fwsc(path.read_bytes())[1]
-        with mock.patch.object(fu, "V15_LOGICAL_SHA256",
-                               hashlib.sha256(logical[0x4000:0x93000]).hexdigest()):
+        with mock.patch.object(fu, "V15_FLASH_FW_SHA256",
+                               hashlib.sha256(image[0x4000:0x93000]).hexdigest()):
             self.assertEqual(fu.Package.load(path).kind, "official-v15")
             dev, m = self.device()
             before = bytes(m.flash)
             self.assertEqual(fu.main(["restore", str(path), "--yes", "--verify-v15"],
                                      device=dev), 0)
         self.check_restored(m, before, image)
+        self.assertIn("differs from the genuine", self.out.getvalue())
+
+    @unittest.skipUnless(V15_FWSC.is_file(), "genuine V15 package not available")
+    def test_genuine_v15(self):
+        pkg = fu.Package.load(V15_FWSC)
+        self.assertEqual(pkg.fl_off, 0x400)
+        self.assertEqual(pkg.kind, "official-v15")
+        self.assertEqual(pkg.file_sha256, fu.V15_FILE_SHA256)
 
     def test_unknown_identity_needs_i_know(self):
         path, image = self.package(identity="")

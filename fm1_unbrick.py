@@ -61,13 +61,11 @@ DEVICE_VENDOR = "WL82"
 DEVICE_PRODUCT = "UBOOT1.00"
 DEVICE_MODEL = "WL82 UBOOT1.00"
 
-# Official M-VAVE V15. V15_LOGICAL_SHA256 is over logical[0x4000:0x93000] of the genuine
-# FM-1.fwsc (NOT the flash region: the flash image starts at the UFW flash.bin offset, 0x400);
-# it only identifies the genuine file. V15_FLASH_FW_SHA256 is the flash.bin region
-# 0x4000..0x92FFF hash.
+# Official M-VAVE V15: identified by the hash of its firmware region 0x4000..0x92FFF of the
+# package's flash.bin. V15_FILE_SHA256 is the genuine FM-1.fwsc file (informational only).
 V15_IDENTITY = "FM-1_015"
-V15_LOGICAL_SHA256 = "6edf3c37fb5bbbc33607c89375ee024d5477c17914d72221c8c68e58a8255686"
-V15_FLASH_FW_SHA256 = None  # the flash.bin region hash: fill in from the genuine FM-1.fwsc (python3 fm1_unbrick.py extract FM-1.fwsc out.bin --verify-v15 prints it)
+V15_FLASH_FW_SHA256 = "6edf3c37fb5bbbc33607c89375ee024d5477c17914d72221c8c68e58a8255686"
+V15_FILE_SHA256 = "db1642b2b6fa5c2cccb11ffd13878068bb28601678d3644049f99dc40e7edb8a"
 
 # .fwsc packaging: the first FWSC_MARKED_BLOCKS blocks of FWSC_BLOCK data
 # bytes are each followed by one marker byte. The markers spell the package
@@ -273,11 +271,10 @@ def ufw_flash(image: bytes):
 IDENTITY_RE = re.compile(r"^FM-1_(\d{3})$")
 
 
-def classify(identity: str, logical_sha: str):
-    """Return (kind, description) of a package. logical_sha is sha256 of
-    logical[0x4000:0x93000] (identification of the genuine V15 file only)."""
+def classify(identity: str, fw_sha: str):
+    """Return (kind, description) of a package (fw_sha: flash.bin region hash)."""
     m = IDENTITY_RE.match(identity)
-    if logical_sha == V15_LOGICAL_SHA256:
+    if fw_sha == V15_FLASH_FW_SHA256:
         return "official-v15", "official M-VAVE V15 (sha256 verified)"
     if identity == V15_IDENTITY:
         return "damaged-v15", ("claims to be official V15 but the firmware hash does "
@@ -311,13 +308,7 @@ class Package:
         self.firmware = self.flash[FW_START:FW_END]
         self.firmware_sha256 = sha256(self.firmware)
         self.head_sha256 = sha256(self.head)
-        # identification only: the slice the V15 hash was originally computed over
-        self.logical_sha256 = sha256(self.image[FW_START:FW_END])
-        self.kind, self.description = classify(self.identity, self.logical_sha256)
-        if (self.kind == "official-v15" and V15_FLASH_FW_SHA256 is not None
-                and self.firmware_sha256 != V15_FLASH_FW_SHA256):
-            self.kind, self.description = "damaged-v15", (
-                "identifies as official V15 but the flash region hash does NOT match")
+        self.kind, self.description = classify(self.identity, self.firmware_sha256)
 
     @classmethod
     def load(cls, path):
@@ -336,9 +327,12 @@ class Package:
         log.info("  flash.bin        offset 0x%X in the logical image, 0x%X bytes", self.fl_off,
                  self.fl_len)
         log.info("  firmware sha256  %s", self.firmware_sha256)
-        if self.kind == "official-v15" and V15_FLASH_FW_SHA256 is None:
-            log.info("  (V15 flash-region hash not yet pinned in this tool; the file is "
-                     "identified by its logical hash %s)", V15_LOGICAL_SHA256)
+        if self.kind == "official-v15":
+            if self.file_sha256 == V15_FILE_SHA256:
+                log.info("  file sha256 = the genuine V15 FM-1.fwsc (informational)")
+            else:
+                log.warning("  NOTE: firmware region is V15, but the file differs from the "
+                            "genuine FM-1.fwsc (sha256 %s); informational only", V15_FILE_SHA256)
         log.debug("  package head sha256 %s", self.head_sha256)
 
     def check_writable(self, i_know=False):
@@ -347,10 +341,9 @@ class Package:
             raise SafetyError("the firmware region of %s is blank; refusing" % self.path.name)
         if self.kind == "damaged-v15":
             raise SafetyError(
-                "%s says it is official V15 but its hash does not match the genuine file "
-                "(logical %s, flash region %s). "
+                "%s says it is official V15 but its firmware hash is %s, not %s. "
                 "Download FM-1.fwsc again from M-VAVE; refusing to write it."
-                % (self.path.name, self.logical_sha256, self.firmware_sha256))
+                % (self.path.name, self.firmware_sha256, V15_FLASH_FW_SHA256))
         if self.kind == "unknown":
             if not i_know:
                 raise SafetyError("%s has no recognisable FM-1 identity (%r); refusing "
@@ -960,7 +953,7 @@ def analyse_dump(data: bytes, packages=()):
     log.info("Analysis")
     log.info("  boot head 0x0000..0x3FFF sha256  %s", sha256(head))
     log.info("  firmware  0x4000..0x92FFF sha256 %s", fw_sha)
-    if V15_FLASH_FW_SHA256 is not None and fw_sha == V15_FLASH_FW_SHA256:
+    if fw_sha == V15_FLASH_FW_SHA256:
         log.info("  firmware region = official M-VAVE V15 (exact)")
     sectors = FW_LEN // SECTOR_SIZE
     blank = sum(1 for i in range(sectors)
@@ -1126,17 +1119,11 @@ def cmd_extract(args):
     pkg = Package.load(args.package)
     pkg.log_summary()
     if args.verify_v15 and pkg.kind != "official-v15":
-        log.error("NOT the official V15 firmware: expected logical sha256 %s%s. Stop here.",
-                  V15_LOGICAL_SHA256, "" if V15_FLASH_FW_SHA256 is None
-                  else " and flash-region sha256 %s" % V15_FLASH_FW_SHA256)
+        log.error("NOT the official V15 firmware: expected sha256 %s. Stop here.",
+                  V15_FLASH_FW_SHA256)
         return EXIT_FAIL
     if args.verify_v15:
-        log.info("V15 file identified (logical hash verified).")
-        if V15_FLASH_FW_SHA256 is None:
-            log.info("V15 flash-region sha256 %s (not yet pinned in this tool)",
-                     pkg.firmware_sha256)
-        else:
-            log.info("V15 flash-region hash verified.")
+        log.info("V15 hash verified.")
     out = Path(args.out)
     out.write_bytes(pkg.firmware)
     log.info("Wrote %s (0x%X bytes); write it at 0x%X only.", out, len(pkg.firmware), FW_START)
