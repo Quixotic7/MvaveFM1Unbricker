@@ -26,6 +26,10 @@ Safety rules, enforced in code:
   * without --write, restore is a dry run;
   * a final full read must equal the expected image.
 
+For a first-time user: `setup` (fetches JieLi's loader, builds the Transporter
+firmware from the prebuilt placeholder in transporter/, installs pyserial), then
+`wizard --v15 FM-1.fwsc` (every step, with prompts).
+
 Run `python fm1_transporter_recover.py --help` and see README.md.
 """
 
@@ -37,8 +41,10 @@ import logging
 import os
 import shutil
 import struct
+import subprocess
 import sys
 import time
+import types
 import zlib
 from pathlib import Path
 
@@ -77,10 +83,26 @@ PAGE = 256                            # SPI NOR program page
 # Transporter / XIAO RP2040
 RP2_VID = 0x2E8A
 TRANSPORTER_PID = 0x000A
-UF2_MAGIC0 = b"UF2\n"
-UF2_MAGIC1 = 0x0AB16F30
+UF2_MAGIC0 = b"UF2\n"                 # 0x0A324655 little-endian
+UF2_MAGIC1 = 0x9E5D5157
 UF2_MAGIC_END = 0x0AB16F30
+UF2_BLOCK = 512
+UF2_PAYLOAD_MAX = 476
+UF2_FLAG_NOT_MAIN_FLASH = 0x00000001
 RP2_VOLUME = "RPI-RP2"
+
+# The prebuilt Transporter firmware (kurogedelic/FM-1-transporter a632d92, XIAO RP2040) with a
+# placeholder where JieLi's wl82loader.bin goes; `setup` splices the real loader in.
+SCRIPT_DIR = Path(__file__).resolve().parent
+TRANSPORTER_DIR = SCRIPT_DIR / "transporter"
+PLACEHOLDER_UF2 = TRANSPORTER_DIR / "fm1_transporter-a632d92-placeholder.uf2"
+PLACEHOLDER_PATTERN = TRANSPORTER_DIR / "placeholder_loader.pattern"
+DEFAULT_UF2 = TRANSPORTER_DIR / "fm1_transporter.uf2"
+PLACEHOLDER_UF2_SHA256 = "363ec4b98071a40a1eadec14574c936c78bd8f2afdf17cc890104e887771b577"
+PLACEHOLDER_PATTERN_SHA256 = "25f62babdb1c62753f7e293338c8ee1b6f323aec9805644b794e6581e7c5bc29"
+WL82_LOADER_SHA256 = "d41da6126760c9d66660bcc0cac8d27d221806c5e369a8036921efe68dca5376"
+TRANSPORTER_UF2_SHA256 = "f275a52a0bd870c72f523ae28a54ac4d81dda9068a271318aa21dbdf95ef55ea"
+assert WL82_LOADER_SHA256 == fu.WL82_LOADER_SHA256
 BOOTSEL_WAIT = 15.0
 REBOOT_WAIT = 20.0
 HINT_EVERY = 5.0
@@ -1021,9 +1043,10 @@ def load_restore_package(path, verify_v15):
     return pkg
 
 
-def restore_session(t: Transporter, plan: Plan, args, write: bool):
+def restore_session(t: Transporter, plan: Plan, args, write: bool, confirm=None):
     """In one Transporter session: identity, fresh read == --ref, then (write) the
-    differing sectors and the final verify. Returns an exit code."""
+    differing sectors and the final verify. Returns an exit code. `confirm`
+    (args, lines, phrase) replaces fu.confirm (the wizard asks through its own input)."""
     check_info(t)
     log.info("Fresh full read ...")
     now = t.read_flash(0, FLASH_SIZE, "Fresh read")
@@ -1044,7 +1067,7 @@ def restore_session(t: Transporter, plan: Plan, args, write: bool):
         log.info(DONE_TEXT)
         return EXIT_OK
 
-    fu.confirm(args, [
+    (confirm or fu.confirm)(args, [
         "",
         "About to WRITE the FM-1 flash through the Transporter:",
         "  port      %s%s" % (t.port, "  [MOCK]" if t.mock else ""),
@@ -1095,6 +1118,15 @@ def restore_session(t: Transporter, plan: Plan, args, write: bool):
 # flash-xiao
 # --------------------------------------------------------------------------
 
+def check_uf2_bytes(data: bytes, name="the UF2 file") -> bytes:
+    """Cheap whole-file check: a multiple of 512 bytes, the first block's three magics."""
+    if (len(data) < UF2_BLOCK or len(data) % UF2_BLOCK or data[:4] != UF2_MAGIC0
+            or _u32(data, 4) != UF2_MAGIC1 or _u32(data, 508) != UF2_MAGIC_END):
+        raise fu.SafetyError("%s does not carry the UF2 magic (UF2\\n, 0x9E5D5157, 0x0AB16F30); "
+                             "refusing" % name)
+    return data
+
+
 def check_uf2(path: Path) -> bytes:
     if path.suffix.lower() != ".uf2":
         raise fu.SafetyError("%s is not a .uf2 file; refusing" % path)
@@ -1102,11 +1134,62 @@ def check_uf2(path: Path) -> bytes:
         data = path.read_bytes()
     except OSError as e:
         raise fu.UnbrickError("cannot read %s: %s" % (path, e))
-    if (len(data) < 512 or len(data) % 512 or data[:4] != UF2_MAGIC0
-            or _u32(data, 4) != UF2_MAGIC1 or _u32(data, 508) != UF2_MAGIC_END):
-        raise fu.SafetyError("%s does not carry the UF2 magic (UF2\\n, 0x0AB16F30); refusing"
-                             % path)
-    return data
+    return check_uf2_bytes(data, str(path))
+
+
+def parse_uf2(data: bytes, name="the UF2 file"):
+    """Strictly parse a flash UF2: every block's magics, block numbers 0..n-1 of n,
+    payload sizes 1..476, main-flash blocks only, consecutive target addresses.
+    Returns [(block, payload_size)]; the block is the original 512 bytes."""
+    check_uf2_bytes(data, name)
+    n = len(data) // UF2_BLOCK
+    out, next_addr = [], None
+    for i in range(n):
+        blk = data[i * UF2_BLOCK:(i + 1) * UF2_BLOCK]
+        m0, m1, flags, addr, size, num, total = struct.unpack_from("<4sIIIIII", blk, 0)
+        where = "%s block %d" % (name, i)
+        if m0 != UF2_MAGIC0 or m1 != UF2_MAGIC1 or _u32(blk, 508) != UF2_MAGIC_END:
+            raise fu.SafetyError("%s: bad UF2 magic" % where)
+        if flags & UF2_FLAG_NOT_MAIN_FLASH:
+            raise fu.SafetyError("%s is not a main-flash block (flags 0x%08X)" % (where, flags))
+        if not 0 < size <= UF2_PAYLOAD_MAX:
+            raise fu.SafetyError("%s: payload size %d" % (where, size))
+        if num != i or total != n:
+            raise fu.SafetyError("%s says it is block %d of %d" % (where, num, total))
+        if next_addr is not None and addr != next_addr:
+            raise fu.SafetyError("%s: address 0x%08X does not follow 0x%08X (not consecutive)"
+                                 % (where, addr, next_addr))
+        next_addr = addr + size
+        out.append((blk, size))
+    return out
+
+
+def splice_uf2(placeholder_uf2: bytes, pattern: bytes, loader: bytes) -> bytes:
+    """Replace the one occurrence of `pattern` in the UF2's flat image (its payloads
+    joined in order) with `loader` (same length) and re-emit the same blocks: same
+    headers, same addresses, same padding; only payload bytes change."""
+    if not pattern:
+        raise fu.SafetyError("the placeholder pattern is empty")
+    if len(loader) != len(pattern):
+        raise fu.SafetyError("the loader is %d bytes but the placeholder is %d; refusing"
+                             % (len(loader), len(pattern)))
+    blocks = parse_uf2(placeholder_uf2, "the placeholder firmware")
+    flat = b"".join(blk[32:32 + size] for blk, size in blocks)
+    at = flat.find(pattern)
+    if at < 0:
+        raise fu.SafetyError("the placeholder is not in the firmware image; refusing")
+    if flat.find(pattern, at + 1) >= 0:
+        raise fu.SafetyError("the placeholder occurs more than once in the firmware image; "
+                             "refusing")
+    flat = flat[:at] + loader + flat[at + len(loader):]
+    out, pos = bytearray(), 0
+    for blk, size in blocks:
+        out += blk[:32] + flat[pos:pos + size] + blk[32 + size:]
+        pos += size
+    out = bytes(out)
+    assert len(out) == len(placeholder_uf2) and pos == len(flat)
+    parse_uf2(out, "the spliced firmware")
+    return out
 
 
 def rp2_volume_candidates():
@@ -1315,6 +1398,529 @@ def cmd_recover(args, transporter=None):
 
 
 # --------------------------------------------------------------------------
+# setup: jl-uboot-tool's loader spliced into the prebuilt placeholder firmware
+# --------------------------------------------------------------------------
+
+RERUN_SETUP = "Run `python3 fm1_transporter_recover.py setup` again"
+
+
+def read_checked(path: Path, want: str, what: str, fix: str) -> bytes:
+    """The file's bytes if its sha256 is `want`; else a plain-language UnbrickError."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError as e:
+        raise fu.UnbrickError("cannot read %s (%s): %s. %s" % (what, path, e.strerror or e, fix))
+    got = fu.sha256(data)
+    if got != want:
+        raise fu.UnbrickError("%s (%s) is not the expected file: its sha256 is %s, expected %s. %s"
+                              % (what, path, got, want, fix))
+    log.info("  %-34s sha256 %s  OK", what, got)
+    return data
+
+
+def build_transporter_uf2(jl_dir: Path) -> bytes:
+    """Check the three inputs, splice, check the result: the firmware to flash."""
+    placeholder = read_checked(PLACEHOLDER_UF2, PLACEHOLDER_UF2_SHA256, "placeholder firmware",
+                               "This repository's transporter/ folder is damaged: download "
+                               "the repository again.")
+    pattern = read_checked(PLACEHOLDER_PATTERN, PLACEHOLDER_PATTERN_SHA256, "placeholder pattern",
+                           "This repository's transporter/ folder is damaged: download the "
+                           "repository again.")
+    loader = read_checked(Path(jl_dir) / fu.WL82_LOADER_REL, WL82_LOADER_SHA256,
+                          "JieLi loader wl82loader.bin",
+                          ("Run `setup` first (it downloads jl-uboot-tool once into %s)."
+                           if not Path(jl_dir).exists() else
+                           "Delete the folder %s and run setup again (it downloads jl-uboot-tool "
+                           "once).") % jl_dir)
+    out = splice_uf2(placeholder, pattern, loader)
+    got = fu.sha256(out)
+    if got != TRANSPORTER_UF2_SHA256:
+        raise fu.UnbrickError("the spliced firmware has sha256 %s, expected %s; nothing was "
+                              "written. Download the repository again." % (got,
+                                                                           TRANSPORTER_UF2_SHA256))
+    log.info("  %-34s sha256 %s  OK", "spliced Transporter firmware", got)
+    return out
+
+
+class _DropMacNote(logging.Filter):
+    """fm1_unbrick's setup ends with a note that its own USB route needs Windows or
+    Linux, a pip note and "Setup complete."; none applies to the Transporter
+    route, so they are hidden from the console (the log file keeps them)."""
+
+    HIDE = (fu.MACOS_MESSAGE, "Skipping pip", "Setup complete.")
+
+    def filter(self, record):
+        msg = record.getMessage()
+        return not any(h in msg for h in self.HIDE)
+
+
+def fetch_jlub(jl_dir: Path):
+    """fm1_unbrick's setup (git clone or GitHub zip at the pinned commit, or just a
+    check of an existing folder); its pip step is skipped: only the loader is used."""
+    ns = types.SimpleNamespace(jl_dir=str(jl_dir), source=None, dry_run=False, no_pip=True)
+    filt = _DropMacNote()
+    console = [h for h in fu.log.handlers if not isinstance(h, logging.FileHandler)]
+    for h in console:
+        h.addFilter(filt)
+    try:
+        fu.cmd_setup(ns)
+    except fu.UnbrickError as e:
+        raise fu.UnbrickError("jl-uboot-tool check failed: %s. If the problem stays, delete the "
+                              "folder %s and run setup again (needs the internet once)."
+                              % (e, jl_dir))
+    except Exception as e:      # network, disk
+        raise fu.UnbrickError("could not download jl-uboot-tool (%s). Check the internet "
+                              "connection and run setup again." % e)
+    finally:
+        for h in console:
+            h.removeFilter(filt)
+
+
+def pyserial_ok() -> bool:
+    try:
+        import serial  # noqa: F401
+        import serial.tools.list_ports  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def ask_yes_no(input_fn, prompt) -> bool:
+    try:
+        answer = input_fn(prompt)
+    except EOFError:
+        return False
+    log.debug("answer %r", answer)
+    return answer.strip().lower() in ("y", "yes")
+
+
+def ensure_pyserial(args, input_fn, run=None):
+    run = run or subprocess.run
+    if pyserial_ok():
+        log.info("  pyserial is installed")
+        return
+    cmd = [sys.executable, "-m", "pip", "install", "pyserial"]
+    log.info("pyserial (the serial-port library this tool needs) is not installed.")
+    if not args.yes and not ask_yes_no(input_fn, "Install it now with `%s`? [y/N] "
+                                       % " ".join(cmd)):
+        raise fu.UnbrickError("pyserial is needed. Install it with `%s` (or run setup again and "
+                              "answer y)." % " ".join(cmd))
+    log.info("Running %s", " ".join(cmd))
+    try:
+        res = run(cmd)
+        rc = res.returncode
+    except OSError as e:
+        rc = str(e)
+    if rc != 0 or not pyserial_ok():
+        raise fu.UnbrickError("installing pyserial failed (%s). Check the internet connection, "
+                              "then run `%s` yourself." % (rc, " ".join(cmd)))
+    log.info("  pyserial installed")
+
+
+def write_atomic(path: Path, data: bytes):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(str(tmp), "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(str(tmp), str(path))
+
+
+def cmd_setup(args, input_fn=input):
+    jl_dir, out = Path(args.jl_dir), Path(args.uf2)
+    if args.check:
+        log.info("Checking every fingerprint (nothing is downloaded or written):")
+        data = build_transporter_uf2(jl_dir)
+        if out.is_file():
+            got = fu.sha256(out.read_bytes())
+            if got != fu.sha256(data):
+                raise fu.UnbrickError("%s has sha256 %s, expected %s. %s to rebuild it."
+                                      % (out, got, TRANSPORTER_UF2_SHA256, RERUN_SETUP))
+            log.info("  %-34s sha256 %s  OK", str(out), got)
+        else:
+            log.info("  %s is not built yet: run setup", out)
+        log.info("All fingerprints match.")
+        return EXIT_OK
+
+    log.info("Step 1/4: jl-uboot-tool at commit %s (only its wl82 loader is used)",
+             fu.JLUB_COMMIT[:7])
+    fetch_jlub(jl_dir)
+    log.info("Step 2/4: checking the fingerprints of the firmware pieces")
+    data = build_transporter_uf2(jl_dir)
+    log.info("Step 3/4: the Transporter firmware file")
+    if out.is_file() and out.read_bytes() == data:
+        log.info("  %s is already built and correct", out)
+    else:
+        write_atomic(out, data)
+        if fu.sha256(out.read_bytes()) != TRANSPORTER_UF2_SHA256:
+            raise fu.UnbrickError("%s does not read back correctly (disk problem?). %s."
+                                  % (out, RERUN_SETUP))
+        log.info("  wrote %s", out)
+    log.info("Transporter firmware: %s", out.resolve())
+    log.info("  sha256 %s", TRANSPORTER_UF2_SHA256)
+    log.info("Step 4/4: pyserial")
+    ensure_pyserial(args, input_fn)
+    log.info("Setup complete. Next: python3 fm1_transporter_recover.py wizard --v15 FM-1.fwsc")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------
+# wizard: the whole recovery, one step at a time, for someone doing it once
+# --------------------------------------------------------------------------
+
+V15_URL = "https://www.m-vave.com/download"
+
+WIRING_TEXT = """\
+  Wire the XIAO to the FM-1's USB-C pigtail (three wires):
+
+    XIAO pin      pigtail wire   FM-1 USB
+    D6 (GP0)      green          D+
+    D7 (GP1)      white          D-
+    GND           black          GND
+    (nothing)     red            VBUS 5 V: NOT connected, tape it off
+
+  Where the pins are: D6 and D7 are the two pins FARTHEST from the XIAO's USB-C
+  socket, one on each edge. GND is the SECOND pin from the USB-C end on the 5 V
+  side. Picture: transporter/xiao-wiring.svg (or TRANSPORTER-GUIDE.md).
+
+  * The FM-1 must be switched OFF while you wire it.
+  * Charge the FM-1 fully first: it runs on its battery during all of this.
+  * Swapping D+ and D- damages nothing; the FM-1 is simply not found."""
+
+FLASH_ADVICE = """\
+  What to try:
+  * Use a USB-C cable that carries data (a charge-only cable shows nothing).
+  * Unplug the XIAO, hold its small B (BOOT) button, plug it in again, then let
+    go: a disk called RPI-RP2 should appear on this computer.
+  * Keep only one XIAO / Raspberry Pi Pico board plugged in.
+  * Linux: if the port cannot be opened, run `sudo usermod -aG dialout $USER`,
+    log out and back in."""
+
+CONNECT_ADVICE = """\
+  What to try:
+  * Check the three wires: D6 green to D+, D7 white to D-, GND black to GND;
+    the red wire must NOT be connected.
+  * Switch the FM-1 OFF, unplug the XIAO from the computer and plug it back in,
+    then switch the FM-1 ON again.
+  * Make sure the FM-1's battery is charged.
+  * If it still does not answer, quit (q) and run
+    `python3 fm1_transporter_recover.py rekey`, then switch the FM-1 off and on."""
+
+DUMP_ADVICE = """\
+  What to try:
+  * The two reads did not agree or the transfer stopped: press the wires
+    firmly onto the pins, keep them away from the computer's power supply.
+  * Then switch the FM-1 off, unplug and replug the XIAO, switch the FM-1 on."""
+
+FINAL_TEXT = """\
+  1. Switch the FM-1 OFF.
+  2. Remove the three wires (and the pigtail) from the FM-1.
+  3. Switch the FM-1 ON: it boots stock V15.
+  4. Plug it into the computer normally and install whatever firmware you
+     want, on a full battery, with the computer awake (no sleep) until the
+     installer says it is done."""
+
+
+class WizardQuit(fu.UnbrickError):
+    """The person chose to stop (or there is no keyboard to answer on)."""
+
+
+def clean_path(text: str) -> str:
+    """A path typed or dragged into a terminal: quotes and macOS/Linux '\\ ' escapes removed."""
+    p = text.strip()
+    if len(p) >= 2 and p[0] == p[-1] and p[0] in "'\"":
+        p = p[1:-1]
+    if os.sep == "/":
+        p = p.replace("\\ ", " ")
+    return os.path.expanduser(p)
+
+
+class Wizard:
+    STEPS = 6
+
+    def __init__(self, args, input_fn=input, transporter=None):
+        self.args, self.input_fn = args, input_fn
+        self.t = transporter
+        self.own_t = transporter is None
+        self.v15 = None
+        self.writing = False
+
+    # talking to the person ---------------------------------------------------
+
+    def say(self, text=""):
+        for line in text.split("\n"):
+            log.info(line)
+
+    def step(self, n, title, about):
+        log.info("")
+        log.info("=" * 72)
+        log.info("Step %d of %d: %s", n, self.STEPS, title)
+        log.info("=" * 72)
+        self.say(about)
+
+    def ask(self, prompt):
+        """The answer, or None when there is no keyboard (end of input)."""
+        log.debug("prompt %r", prompt)
+        try:
+            answer = self.input_fn(prompt)
+        except EOFError:
+            log.debug("no input (EOF)")
+            return None
+        log.debug("answer %r", answer)
+        return answer
+
+    def pause(self, prompt="Press Enter when done"):
+        answer = self.ask("%s (q quits): " % prompt)
+        if answer is None:
+            if self.args.yes:
+                log.info("(no keyboard input; --yes: continuing)")
+                return ""
+            raise WizardQuit("no keyboard input to answer on; run the wizard in a terminal")
+        if answer.strip().lower() in ("q", "quit", "exit"):
+            raise WizardQuit("stopped at your request")
+        return answer.strip()
+
+    def attempt(self, what, fn, advice):
+        """Run fn until it succeeds; after a failure explain and offer a retry."""
+        while True:
+            try:
+                return fn()
+            except WizardQuit:
+                raise
+            except fu.UnbrickError as e:
+                problem = str(e)
+            except Exception as e:      # e.g. a serial port that vanished
+                log.debug("%s failed", what, exc_info=True)
+                problem = "%s: %s" % (type(e).__name__, e)
+            log.error("")
+            log.error("Problem while %s: %s", what, problem)
+            self.say(advice)
+            answer = self.ask("Press Enter to try this step again (q quits): ")
+            if answer is None or answer.strip().lower() in ("q", "quit", "exit"):
+                raise WizardQuit("stopped after: %s" % problem)
+
+    def confirm(self, args, lines, phrase):
+        """restore_session's typed confirmation, asked through the wizard's input."""
+        for line in lines:
+            log.info(line)
+        if args.yes:
+            log.info("Confirmation skipped (--yes)")
+        else:
+            answer = self.ask("Type %s (capital letters) to write the FM-1 now; anything else "
+                              "cancels: " % phrase)
+            if answer is None or answer.strip() != phrase:
+                raise WizardQuit("you did not type %s, so nothing was written. The FM-1 is "
+                                 "unchanged; run the wizard again when you are ready" % phrase)
+        self.writing = True
+
+    # steps --------------------------------------------------------------------
+
+    def get_v15(self):
+        path = self.args.v15
+        while True:
+            if not path:
+                self.say("  The wizard needs the official V15 firmware file, FM-1.fwsc.\n"
+                         "  Download it from %s (M-VAVE does not allow it to be\n"
+                         "  shared, so it is not included here)." % V15_URL)
+                answer = self.ask("Path to FM-1.fwsc (you can drag the file into this window), "
+                                  "q quits: ")
+                if answer is None:
+                    raise WizardQuit("no V15 file given; start the wizard again with "
+                                     "--v15 /path/to/FM-1.fwsc")
+                if answer.strip().lower() in ("q", "quit", "exit"):
+                    raise WizardQuit("stopped at your request")
+                path = clean_path(answer)
+                if not path:
+                    continue
+            log.info("Checking %s ...", path)
+            try:
+                pkg = fu.Package.load(path)
+            except Exception as e:
+                log.error("  That file cannot be used: %s", e)
+                log.error("  Give the path of FM-1.fwsc as downloaded from %s.", V15_URL)
+                path = None
+                continue
+            if pkg.kind != "official-v15":
+                log.error("  %s is %s, not the official V15.", pkg.path.name, pkg.description)
+                log.error("  Download FM-1.fwsc again from %s and give its path.", V15_URL)
+                path = None
+                continue
+            pkg.check_writable(False)
+            log.info("  Official V15 verified: firmware sha256 %s", pkg.firmware_sha256)
+            return pkg
+
+    def step0_checks(self):
+        a = self.args
+        self.step(0, "checks", "  Checking that setup was run, that the Transporter firmware file "
+                               "is intact,\n  that pyserial is installed, and that you have the "
+                               "official V15 file.")
+        uf2 = Path(a.uf2)
+        if not uf2.is_file():
+            msg = ("the Transporter firmware %s is missing. Run `python3 fm1_transporter_recover.py "
+                   "setup` first (it needs the internet once), then start the wizard again" % uf2)
+            if not a.dry_run:
+                raise fu.UnbrickError(msg)
+            log.warning("  DRY RUN: %s (a real run stops here)", msg)
+        else:
+            got = fu.sha256(uf2.read_bytes())
+            if got != TRANSPORTER_UF2_SHA256:
+                raise fu.UnbrickError("the Transporter firmware %s is not the expected file "
+                                      "(sha256 %s). %s, then start the wizard again"
+                                      % (uf2, got, RERUN_SETUP))
+            log.info("  Transporter firmware %s  sha256 %s  OK", uf2, got)
+        if pyserial_ok():
+            log.info("  pyserial is installed")
+        elif a.dry_run:
+            log.info("  pyserial is not installed (not needed for a dry run)")
+        else:
+            raise fu.UnbrickError("pyserial is not installed. Run `python3 "
+                                  "fm1_transporter_recover.py setup`, then start the wizard again")
+        self.v15 = self.get_v15()
+
+    def step1_flash(self):
+        a = self.args
+        self.step(1, "put the Transporter firmware on the XIAO",
+                  "  Plug the XIAO RP2040 into this computer with a USB-C DATA cable.\n"
+                  "  Nothing else is wired to it yet, and the FM-1 is not involved in this "
+                  "step.\n  The wizard then copies the Transporter firmware onto the XIAO.")
+        ns = argparse.Namespace(uf2=str(a.uf2), dry_run=a.dry_run, port=a.port)
+        if a.dry_run:
+            log.info("DRY RUN: skipping flash-xiao (no hardware is touched)")
+            if Path(a.uf2).is_file():
+                cmd_flash_xiao(ns)
+            return
+        answer = self.pause("Press Enter when the XIAO is plugged in (or type skip if it already "
+                            "runs the Transporter firmware)")
+        if answer.lower() == "skip":
+            log.info("Skipping the flash: the XIAO already runs the Transporter firmware.")
+            return
+
+        def go():
+            log.info("Flashing the XIAO ...")
+            if cmd_flash_xiao(ns) != EXIT_OK:
+                raise fu.UnbrickError("the XIAO did not come back with the Transporter firmware")
+            log.info("The XIAO runs the Transporter firmware.")
+        self.attempt("flashing the XIAO", go, FLASH_ADVICE)
+
+    def step2_connect(self):
+        a = self.args
+        self.step(2, "wire the XIAO to the FM-1 and switch the FM-1 on", WIRING_TEXT)
+        self.pause("Press Enter when the three wires are connected and the FM-1 is still OFF")
+        self.say("  Now unplug the XIAO from the computer and plug it back in (this restarts\n"
+                 "  the Transporter so it is ready), then switch the FM-1 ON.\n"
+                 "  The FM-1's screen stays dark: that is expected.")
+        self.pause("Press Enter right after you have switched the FM-1 on")
+
+        def go():
+            if self.t is None:
+                log.info("Looking for the Transporter (up to %d s) ...", a.wait)
+                self.t = connect(a)
+            log.info("Waiting for the FM-1 to answer ...")
+            try:
+                ready(self.t, a)
+                check_info(self.t)
+            except BaseException:
+                if self.own_t:
+                    self.t.close()
+                    self.t = None
+                raise
+        self.attempt("connecting to the FM-1", go, CONNECT_ADVICE)
+
+    def step3_dump(self):
+        a = self.args
+        self.step(3, "back up the FM-1 and look at what is in it",
+                  "  Reading the whole 1 MiB flash twice (about a minute) and saving it in %s.\n"
+                  "  Nothing is written. Keep this file: it is the backup of your FM-1 as it "
+                  "is now." % a.out)
+        labelled, v15 = load_labelled(None, (), extra=self.v15)
+
+        def go():
+            return dump_and_analyse(self.t, a.out, labelled, v15)
+        path, data, rep = self.attempt("reading the FM-1", go, DUMP_ADVICE)
+        verdict = rep.lines[rep.lines.index("(f) Verdict") + 1:]
+        log.info("")
+        log.info("In short (the backup is %s):", path)
+        for line in verdict:
+            log.info(line)
+        return path, data
+
+    def step4_plan(self, path, data):
+        self.step(4, "plan the repair (nothing is written)",
+                  "  Comparing the backup with V15 sector by sector, then checking that the "
+                  "FM-1\n  still holds exactly what was backed up. Nothing is written in this "
+                  "step.")
+        plan = Plan(self.v15, data, path)
+        plan.report()
+        restore_session(self.t, plan, self.args, False)
+        return plan
+
+    def step5_write(self, plan):
+        self.step(5, "write V15 to the FM-1",
+                  "  This is the only step that changes the FM-1: %d sectors of 4 KiB of the\n"
+                  "  application area are rewritten with V15, then the whole flash is read\n"
+                  "  back and compared. The first 16 KiB (the boot area) are never written.\n"
+                  "  Do not switch anything off, do not unplug anything, keep the computer awake."
+                  % len(plan.write))
+        rc = restore_session(self.t, plan, self.args, True, confirm=self.confirm)
+        if rc == EXIT_DANGER:
+            self.say("\n  The write did not finish. Leave the FM-1 switched ON and the wires "
+                     "connected,\n  then start the wizard again: it backs up again and writes "
+                     "only what still\n  differs.")
+        return rc
+
+    def step6_done(self):
+        self.step(6, "finish", FINAL_TEXT)
+
+    def run(self):
+        a = self.args
+        if a.dry_run:
+            log.info("DRY RUN: every step runs against a MOCK Transporter; no hardware is touched.")
+        try:
+            self.step0_checks()
+            self.step1_flash()
+            self.step2_connect()
+            path, data = self.step3_dump()
+            plan = self.step4_plan(path, data)
+            rc = self.step5_write(plan)
+            if rc != EXIT_OK:
+                return rc
+            self.step6_done()
+            return EXIT_OK
+        except WizardQuit as e:
+            log.error("")
+            log.error("Stopped: %s.", e)
+            if not self.writing:
+                log.error("Nothing was written to the FM-1. Start the wizard again whenever you "
+                          "are ready.")
+            return EXIT_FAIL
+        except fu.UnbrickError as e:
+            log.error("")
+            log.error("Problem: %s", e)
+            log.error("%s Fix the problem above, then start the wizard again; it repeats "
+                      "every check." % ("" if self.writing else
+                                        "Nothing was written to the FM-1."))
+            return e.code
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            log.debug("unexpected error", exc_info=True)
+            log.error("")
+            log.error("Unexpected problem: %s: %s", type(e).__name__, e)
+            log.error("%sThe log file below has the details; start the wizard again, and if it "
+                      "happens again, open an issue with that log." %
+                      ("" if self.writing else "Nothing was written to the FM-1. "))
+            return EXIT_FAIL
+        finally:
+            if self.t is not None and self.own_t:
+                self.t.close()
+
+
+def cmd_wizard(args, transporter=None, input_fn=input):
+    return Wizard(args, input_fn, transporter).run()
+
+
+# --------------------------------------------------------------------------
 # Command line
 # --------------------------------------------------------------------------
 
@@ -1355,6 +1961,23 @@ def build_parser():
         add_common(p, False)
         return p
 
+    p = sp("setup", "fetch JieLi's loader (jl-uboot-tool, pinned), build "
+                    "transporter/fm1_transporter.uf2, install pyserial")
+    p.add_argument("--jl-dir", default=str(fu.DEFAULT_JL_DIR),
+                   help="jl-uboot-tool folder (default: %(default)s)")
+    p.add_argument("--uf2", default=str(DEFAULT_UF2),
+                   help="where to write the Transporter firmware (default: %(default)s)")
+    p.add_argument("--yes", action="store_true", help="install pyserial without asking")
+    p.add_argument("--check", action="store_true",
+                   help="only verify the four sha256s (placeholder, pattern, loader, result)")
+    p = sp("wizard", "the whole recovery, step by step (run `setup` first)")
+    p.add_argument("--v15", help="the official FM-1.fwsc (V15); asked for if missing")
+    p.add_argument("--out", default="backups", help="dump folder (default: ./backups)")
+    p.add_argument("--uf2", default=str(DEFAULT_UF2),
+                   help="the Transporter firmware (default: %(default)s)")
+    p.add_argument("--yes", action="store_true",
+                   help="skip the typed WRITE confirmation (and keyboard pauses without input)")
+
     p = sp("flash-xiao", "flash the Transporter firmware (.uf2) onto the XIAO RP2040")
     p.add_argument("uf2")
     sp("status", "wait for the FM-1 and print the Transporter status")
@@ -1391,12 +2014,17 @@ def build_parser():
     return ap
 
 
-def main(argv=None, transporter=None):
+def main(argv=None, transporter=None, input_fn=None):
     args = build_parser().parse_args(argv)
     log_path = setup_logging(args.command, Path(args.log_dir))
     log.debug("args %r", vars(args))
+    input_fn = input_fn or input
     try:
         cmd = args.command
+        if cmd == "setup":
+            return cmd_setup(args, input_fn)
+        if cmd == "wizard":
+            return cmd_wizard(args, transporter, input_fn)
         if cmd == "flash-xiao":
             return cmd_flash_xiao(args)
         if cmd == "analyse":

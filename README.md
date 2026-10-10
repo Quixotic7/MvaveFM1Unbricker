@@ -80,10 +80,17 @@ Exit codes: 0 done, 1 refused or failed with nothing written, 2 unsupported plat
 ### The Transporter route: `fm1_transporter_recover.py`
 
 For a unit with no USB device at all, through the [FM-1 Transporter](TRANSPORTER-GUIDE.md).
-Needs pyserial (`pip3 install pyserial`); macOS, Linux or Windows.
+macOS, Linux or Windows; no compiler needed. The short version:
+
+```sh
+python3 fm1_transporter_recover.py setup                  # JieLi loader from jl-uboot-tool, the Transporter firmware file, pyserial
+python3 fm1_transporter_recover.py wizard --v15 FM-1.fwsc  # step-by-step: flash the XIAO, wire it, dump, write V15
+```
 
 | Command | What it does |
 |---|---|
+| `setup` | fetches jl-uboot-tool at the pinned commit, checks `wl82loader.bin`'s sha256, splices it into the prebuilt placeholder firmware (`transporter/`) and checks the result's sha256, installs pyserial if missing |
+| `wizard [--v15 FM-1.fwsc]` | the whole procedure as numbered steps with "press Enter when done" prompts: the checks, `flash-xiao`, the wiring, the FM-1 power-on, `dump` + analysis, the dry run, the typed `WRITE`, the write + verify, the power-cycle |
 | `flash-xiao FILE.uf2` | puts the XIAO RP2040 into its `RPI-RP2` boot disk (the 1200-baud touch, or hold BOOT yourself), copies the Transporter firmware, waits for it to come back |
 | `status` / `info` | waits for the Transporter's data port and for the FM-1 to answer the USB_KEY; `info` requires chip key `0x980F` and flash ID `0x856014` |
 | `rekey` | reboots the Transporter into USB_KEY mode (then switch the FM-1 off and on) |

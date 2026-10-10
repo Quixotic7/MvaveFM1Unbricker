@@ -429,7 +429,7 @@ def uf2_blocks(n=2):
     out = bytearray()
     for i in range(n):
         blk = bytearray(512)
-        struct.pack_into("<4sIIIIIII", blk, 0, b"UF2\n", 0x0AB16F30, 0x2000, 0x10000000 + i * 256,
+        struct.pack_into("<4sIIIIIII", blk, 0, b"UF2\n", 0x9E5D5157, 0x2000, 0x10000000 + i * 256,
                          256, i, n, 0xE48BFF56)
         struct.pack_into("<I", blk, 508, 0x0AB16F30)
         out += blk
@@ -471,6 +471,275 @@ class FlashXiaoTests(Base):
             self.assertEqual(tr.main(["flash-xiao", "fm1-transporter.uf2"]), 0)
         self.assertEqual((vol / "fm1-transporter.uf2").read_bytes(), uf2_blocks())
         self.assertIn("Transporter data port: mock://fm1-transporter", self.out.getvalue())
+
+    def test_real_placeholder_passes_check_uf2(self):
+        data = tr.check_uf2(tr.PLACEHOLDER_UF2)
+        self.assertEqual(len(tr.parse_uf2(data)), 412)
+
+
+# --------------------------------------------------------------------------
+# splice_uf2, setup
+# --------------------------------------------------------------------------
+
+JL_LOADER = Path(os.environ.get("FM1_JL_DIR", PROJECTS / "jl-uboot-tool")) / fu.WL82_LOADER_REL
+
+
+def synthetic_uf2(payloads, base=0x10000000, flags=0x2000, family=0xE48BFF56):
+    """A UF2 with the given payloads at consecutive addresses; padding is not zero
+    so a splice that loses it is caught."""
+    out, addr, n = bytearray(), base, len(payloads)
+    for i, pl in enumerate(payloads):
+        blk = bytearray(bytes([0xA0 + i]) * 512)
+        struct.pack_into("<4sIIIIIII", blk, 0, b"UF2\n", 0x9E5D5157, flags, addr, len(pl), i, n,
+                         family)
+        blk[32:32 + len(pl)] = pl
+        struct.pack_into("<I", blk, 508, 0x0AB16F30)
+        out += blk
+        addr += len(pl)
+    return bytes(out)
+
+
+class SpliceTests(unittest.TestCase):
+
+    def setUp(self):
+        rnd = random.Random(7)
+        self.pattern = b"PLACEHOLDER-" * 6                   # 72 bytes
+        flat = bytearray(rnd.randbytes(256 + 256 + 200))
+        self.at = 230                                       # straddles blocks 0 and 1
+        flat[self.at:self.at + len(self.pattern)] = self.pattern
+        self.flat = bytes(flat)
+        self.uf2 = synthetic_uf2([self.flat[:256], self.flat[256:512], self.flat[512:]])
+        self.loader = rnd.randbytes(len(self.pattern))
+
+    def test_round_trip(self):
+        out = tr.splice_uf2(self.uf2, self.pattern, self.loader)
+        self.assertEqual(len(out), len(self.uf2))
+        for i in range(3):
+            a, b = self.uf2[i * 512:(i + 1) * 512], out[i * 512:(i + 1) * 512]
+            self.assertEqual(a[:32], b[:32])                  # header fields preserved
+            size = struct.unpack_from("<I", a, 16)[0]
+            self.assertEqual(a[32 + size:], b[32 + size:])    # padding + magic end preserved
+        blocks = tr.parse_uf2(out)
+        flat = b"".join(blk[32:32 + size] for blk, size in blocks)
+        want = self.flat[:self.at] + self.loader + self.flat[self.at + len(self.pattern):]
+        self.assertEqual(flat, want)
+        # and back again
+        self.assertEqual(tr.splice_uf2(out, self.loader, self.pattern), self.uf2)
+
+    def test_refusals(self):
+        with self.assertRaisesRegex(fu.SafetyError, "loader is 71 bytes"):
+            tr.splice_uf2(self.uf2, self.pattern, self.loader[:-1])
+        with self.assertRaisesRegex(fu.SafetyError, "not in the firmware"):
+            tr.splice_uf2(self.uf2, b"Z" * 72 + b"Q", b"x" * 73)
+        dup = bytearray(self.flat)
+        dup[600:600 + len(self.pattern)] = self.pattern
+        uf2 = synthetic_uf2([bytes(dup[:256]), bytes(dup[256:512]), bytes(dup[512:])])
+        with self.assertRaisesRegex(fu.SafetyError, "more than once"):
+            tr.splice_uf2(uf2, self.pattern, self.loader)
+        bad = bytearray(self.uf2)
+        bad[2 * 512 + 4] ^= 1                               # block 2 magic1
+        with self.assertRaisesRegex(fu.SafetyError, "block 2: bad UF2 magic"):
+            tr.splice_uf2(bytes(bad), self.pattern, self.loader)
+        bad = bytearray(self.uf2)
+        struct.pack_into("<I", bad, 512 + 12, 0x10000200)   # gap before block 1
+        with self.assertRaisesRegex(fu.SafetyError, "not consecutive"):
+            tr.splice_uf2(bytes(bad), self.pattern, self.loader)
+        bad = bytearray(self.uf2)
+        struct.pack_into("<I", bad, 512 + 20, 5)
+        with self.assertRaisesRegex(fu.SafetyError, "block 5 of 3"):
+            tr.splice_uf2(bytes(bad), self.pattern, self.loader)
+        with self.assertRaisesRegex(fu.SafetyError, "UF2 magic"):
+            tr.splice_uf2(self.uf2[:-1], self.pattern, self.loader)
+
+    @unittest.skipUnless(JL_LOADER.is_file(), "jl-uboot-tool checkout not available")
+    def test_real_splice(self):
+        out = tr.splice_uf2(tr.PLACEHOLDER_UF2.read_bytes(), tr.PLACEHOLDER_PATTERN.read_bytes(),
+                            JL_LOADER.read_bytes())
+        self.assertEqual(fu.sha256(out), tr.TRANSPORTER_UF2_SHA256)
+        self.assertEqual(fu.sha256(out), "f275a52a0bd870c72f523ae28a54ac4d81dda9068a271318aa21dbdf95ef55ea")
+
+
+def fake_jl_dir(root: Path, loader: bytes) -> Path:
+    """What fm1_unbrick's setup accepts as an existing checkout at the pinned commit."""
+    jl = root / "jl"
+    for rel in ("jltech/uboot.py", "jltech/cipher.py", "scsiio/__init__.py", "data/chips.yaml",
+                "data/usb-loaders.yaml"):
+        (jl / rel).parent.mkdir(parents=True, exist_ok=True)
+        (jl / rel).write_text("")
+    (jl / fu.WL82_LOADER_REL).parent.mkdir(parents=True, exist_ok=True)
+    (jl / fu.WL82_LOADER_REL).write_bytes(loader)
+    (jl / fu.JLUB_MARKER).write_text(fu.JLUB_COMMIT + "\n")
+    return jl
+
+
+@unittest.skipUnless(JL_LOADER.is_file(), "jl-uboot-tool checkout not available")
+class SetupTests(Base):
+
+    def setUp(self):
+        super().setUp()
+        self.loader = JL_LOADER.read_bytes()
+
+    def setup_cmd(self, jl, *extra, input_fn=None):
+        return tr.main(["setup", "--jl-dir", str(jl), "--uf2", "out/fm1_transporter.uf2"]
+                       + list(extra), input_fn=input_fn)
+
+    def test_setup_builds_pinned_firmware(self):
+        jl = fake_jl_dir(self.tmp, self.loader)
+        with mock.patch.object(tr, "pyserial_ok", return_value=True), \
+                mock.patch.object(fu, "_git", side_effect=AssertionError("network")):
+            self.assertEqual(self.setup_cmd(jl, "--yes"), 0)
+            out = Path("out/fm1_transporter.uf2")
+            self.assertEqual(fu.sha256(out.read_bytes()), tr.TRANSPORTER_UF2_SHA256)
+            text = self.out.getvalue()
+            self.assertIn(tr.TRANSPORTER_UF2_SHA256, text)
+            self.assertNotIn("not supported", text)                # fm1_unbrick's macOS note
+            # idempotent
+            self.assertEqual(self.setup_cmd(jl, "--yes"), 0)
+            self.assertIn("already built and correct", self.out.getvalue())
+            self.assertEqual(self.setup_cmd(jl, "--check"), 0)
+            self.assertIn("All fingerprints match", self.out.getvalue())
+            out.write_bytes(b"x" + out.read_bytes()[1:])
+            self.assertEqual(self.setup_cmd(jl, "--check"), 1)
+
+    def test_setup_refuses_tampered_loader(self):
+        bad = bytearray(self.loader)
+        bad[100] ^= 1
+        jl = fake_jl_dir(self.tmp, bytes(bad))
+        with mock.patch.object(tr, "pyserial_ok", return_value=True):
+            self.assertEqual(self.setup_cmd(jl, "--yes"), 1)
+        self.assertFalse(Path("out/fm1_transporter.uf2").exists())
+        self.assertIn("jl-uboot-tool check failed", self.out.getvalue())
+        # even past fm1_unbrick's own check, the splice step refuses it
+        with mock.patch.object(fu, "cmd_setup", return_value=0):
+            self.assertEqual(self.setup_cmd(jl, "--yes"), 1)
+        self.assertIn("is not the expected file", self.out.getvalue())
+        self.assertFalse(Path("out/fm1_transporter.uf2").exists())
+
+    def test_pyserial_install_asks_first(self):
+        jl = fake_jl_dir(self.tmp, self.loader)
+        run = mock.Mock(return_value=mock.Mock(returncode=0))
+        with mock.patch.object(tr, "pyserial_ok", return_value=False), \
+                mock.patch.object(tr.subprocess, "run", run):
+            self.assertEqual(self.setup_cmd(jl, input_fn=lambda p: "n"), 1)
+        run.assert_not_called()
+        with mock.patch.object(tr, "pyserial_ok", side_effect=[False, True]), \
+                mock.patch.object(tr.subprocess, "run", run):
+            self.assertEqual(self.setup_cmd(jl, input_fn=lambda p: "y"), 0)
+        self.assertEqual(run.call_args[0][0], [sys.executable, "-m", "pip", "install", "pyserial"])
+
+
+# --------------------------------------------------------------------------
+# wizard
+# --------------------------------------------------------------------------
+
+class Script:
+    """Scripted keyboard answers; EOF when they run out."""
+
+    def __init__(self, answers):
+        self.answers, self.prompts = list(answers), []
+
+    def __call__(self, prompt):
+        self.prompts.append(prompt)
+        if not self.answers:
+            raise EOFError
+        return self.answers.pop(0)
+
+
+class WizardTests(Base):
+
+    def setUp(self):
+        super().setUp()
+        self.path, self.image = self.pkg("FM-1.fwsc", 3, identity="FM-1_015")
+        pkg = fu.Package.load(self.path)
+        p = mock.patch.object(fu, "V15_FLASH_FW_SHA256", pkg.firmware_sha256)  # "official" here
+        p.start()
+        self.addCleanup(p.stop)
+        self.before = flash_from(self.image[:0x4000], random_image(77)[0x4000:0x93000],
+                                 data_area())
+        self.expected = self.before[:0x4000] + self.image[0x4000:0x93000] + self.before[0x93000:]
+
+    def wizard(self, t, answers, *extra):
+        script = Script(answers)
+        rc = tr.main(["--dry-run", "--wait", "2", "wizard", "--out", "bk", "--uf2", "none.uf2"]
+                     + list(extra), transporter=t, input_fn=script)
+        return rc, script
+
+    def test_wizard_synthetic_end_to_end(self):
+        t, m = self.transporter(flash=self.before)
+        other, _ = self.pkg("other.fwsc", 4)
+        rc, s = self.wizard(t, [str(other), "'%s'" % self.path, "", "", "WRITE"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(s.answers, [])
+        self.assertEqual(bytes(m.flash), self.expected)
+        text = self.out.getvalue()
+        self.assertIn("not the official V15", text)
+        for n in range(7):
+            self.assertIn("Step %d of 6" % n, text)
+        self.assertIn("DRY RUN: skipping flash-xiao", text)
+        self.assertIn("D6 (GP0)      green          D+", text)
+        self.assertIn("In short (the backup is", text)
+        self.assertIn("Final full read EQUALS", text)
+        self.assertIn("it boots stock V15", text)
+        self.assertEqual(len(list(Path("bk").glob("*.bin"))), 1)
+
+    def test_wizard_wrong_confirmation_writes_nothing(self):
+        t, m = self.transporter(flash=self.before)
+        rc, s = self.wizard(t, ["", "", "write"], "--v15", str(self.path))
+        self.assertEqual(rc, 1)
+        self.assertEqual(m.writes, [])
+        self.assertEqual(bytes(m.flash), self.before)
+        text = self.out.getvalue()
+        self.assertIn("you did not type WRITE, so nothing was written", text)
+        self.assertNotIn("Step 6 of 6", text)
+        self.assertNotIn("Traceback", text)
+
+    def test_wizard_no_keyboard_without_yes_stops(self):
+        t, m = self.transporter(flash=self.before)
+        rc, s = self.wizard(t, [], "--v15", str(self.path))
+        self.assertEqual(rc, 1)
+        self.assertEqual(m.reads, 0)
+        self.assertIn("Nothing was written to the FM-1", self.out.getvalue())
+
+    def test_wizard_connection_failure_explains_and_retries(self):
+        t, m = self.transporter(flash=self.before, present=False)
+        with mock.patch.object(tr, "HINT_EVERY", 0.2):
+            rc, s = self.wizard(t, ["", "", "", "q"], "--v15", str(self.path), "--wait", "0.3")
+        self.assertEqual(rc, 1)
+        text = self.out.getvalue()
+        self.assertIn("Problem while connecting to the FM-1", text)
+        self.assertIn("the red wire must NOT be connected", text)
+        self.assertEqual(m.writes, [])
+
+    def test_real_run_needs_setup_first(self):
+        with mock.patch.object(tr, "connect", side_effect=AssertionError("port opened")), \
+                mock.patch.object(tr, "cmd_flash_xiao", side_effect=AssertionError("flashed")):
+            rc = tr.main(["wizard", "--uf2", "none.uf2", "--v15", str(self.path)],
+                         input_fn=Script([]))
+        self.assertEqual(rc, 1)
+        self.assertIn("Run `python3 fm1_transporter_recover.py setup` first", self.out.getvalue())
+
+
+@unittest.skipUnless(REAL_DUMP.is_file() and V15_FWSC.is_file(), "real dump / V15 not available")
+class WizardRealTests(Base):
+
+    def test_wizard_real_v15_and_dump(self):
+        uf2 = Path("none.uf2")
+        if JL_LOADER.is_file():
+            uf2 = Path("fm1_transporter.uf2")
+            uf2.write_bytes(tr.splice_uf2(tr.PLACEHOLDER_UF2.read_bytes(),
+                                          tr.PLACEHOLDER_PATTERN.read_bytes(),
+                                          JL_LOADER.read_bytes()))
+        script = Script(["no/such/FM-1.fwsc", str(V15_FWSC), "", "", "WRITE"])
+        rc = tr.main(["--dry-run", "--mock-flash", str(REAL_DUMP), "wizard", "--out", "bk",
+                      "--uf2", str(uf2)], input_fn=script)
+        self.assertEqual(rc, 0)
+        self.assertEqual(script.answers, [])
+        text = self.out.getvalue()
+        self.assertIn("That file cannot be used: cannot read package", text)
+        self.assertIn("Official V15 verified: firmware sha256 %s" % fu.V15_FLASH_FW_SHA256, text)
+        self.assertIn("resume state intact", text)
+        self.assertIn("Final full read EQUALS the expected image", text)
+        self.assertIn("Step 6 of 6: finish", text)
 
 
 if __name__ == "__main__":

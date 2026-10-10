@@ -12,6 +12,26 @@ dump showed, and `fm1_transporter_recover.py`, which automates it.
 > Unofficial. At your own risk. Read the [rules](#rules) first. Nothing here writes below
 > `0x4000`, and nothing is written before a double-read, compared, saved dump.
 
+## The short version (no toolchain, no expert needed)
+
+1. Buy the two parts below; charge the FM-1 fully.
+2. Download `FM-1.fwsc` (the official V15) from <https://www.m-vave.com/download>.
+3. In this folder:
+   ```sh
+   python3 fm1_transporter_recover.py setup      # fetches the JieLi loader, builds the Transporter firmware file, installs pyserial
+   python3 fm1_transporter_recover.py wizard --v15 FM-1.fwsc
+   ```
+   The wizard tells you, step by step, when to plug in the XIAO, how to wire it
+   ([picture](transporter/xiao-wiring.svg)), when to switch the FM-1 on, and asks you to type
+   `WRITE` before the one step that changes the FM-1. Everything it does is also available as
+   separate commands (below) if you prefer to go one step at a time.
+4. When it says done: switch the FM-1 off, remove the three wires, switch it on. It boots stock
+   V15. Install whatever firmware you want the normal way, on a full battery.
+
+No part of this needs a compiler: the Transporter firmware ships prebuilt in `transporter/`
+with a placeholder where JieLi's loader goes, and `setup` splices the loader in from
+jl-uboot-tool and checks every hash ([transporter/README.md](transporter/README.md)).
+
 ## How a unit gets here
 
 ChoralRoot's installer (a Felucca-family update loader, the same one Felucca uses) writes the app
@@ -41,6 +61,8 @@ The dump later showed why nothing could help from the outside (see [What the dum
 | **GND** | GND | black |
 | nothing | VBUS (5 V) | red: tape it off |
 
+![XIAO RP2040 wiring](transporter/xiao-wiring.svg)
+
 "D6" is the label printed on the board; it is GPIO 0 on the chip, which the Transporter firmware
 calls `pin_dp = 0`. D6 and D7 are the two pins farthest from the XIAO's USB-C connector, one on
 each edge. GND is the second pin from the USB-C end on the 5 V side. The pigtail's pins slide out
@@ -48,6 +70,12 @@ of their housing so each can go onto its header pin. Swapped D+/D- damages nothi
 simply not detected. The FM-1 runs on its battery during all of this: **charge it fully first**.
 
 ## Build and flash the Transporter
+
+**You do not have to build it.** `python3 fm1_transporter_recover.py setup` produces
+`transporter/fm1_transporter.uf2` from the prebuilt placeholder firmware in this repository and
+the loader it fetches from jl-uboot-tool (every hash checked; see `transporter/README.md`). Then
+`flash-xiao transporter/fm1_transporter.uf2`, or let the wizard do it. The rest of this section
+is for building it from source.
 
 You need pico-sdk 2.2.0 (`git clone -b 2.2.0 https://github.com/raspberrypi/pico-sdk ~/pico-sdk`,
 then `git submodule update --init` inside it), CMake, an Arm GCC toolchain, and `wl82loader.bin`

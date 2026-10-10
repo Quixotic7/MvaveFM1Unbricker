@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 520" font-family="Helvetica, Arial, sans-serif" font-size="14">
+  <rect width="760" height="520" fill="#fff"/>
+  <text x="20" y="28" font-size="17" font-weight="bold">FM-1 Transporter wiring: XIAO RP2040 to the FM-1's USB-C pigtail, three wires</text>
+  <!-- XIAO board, USB-C at the top -->
+  <rect x="230" y="70" width="150" height="300" rx="10" fill="#1b5e20" stroke="#0a3" stroke-width="2"/>
+  <rect x="280" y="62" width="50" height="22" rx="5" fill="#bbb" stroke="#666"/>
+  <text x="305" y="56" text-anchor="middle" font-size="12">USB-C (to the computer)</text>
+  <rect x="292" y="100" width="26" height="20" rx="3" fill="#333"/>
+  <text x="305" y="114" text-anchor="middle" font-size="9" fill="#fff">BOOT</text>
+  <text x="305" y="245" text-anchor="middle" font-size="13" fill="#cfc">XIAO</text>
+  <text x="305" y="262" text-anchor="middle" font-size="13" fill="#cfc">RP2040</text>
+  <path d="M365 150 C 480 150, 500 170, 500 250 C 500 330, 520 330, 560 330" fill="none" stroke="#000" stroke-width="4"/>
+  <path d="M365 350 C 420 350, 440 345, 560 345" fill="none" stroke="#999" stroke-width="4"/>
+  <path d="M245 350 C 160 350, 160 410, 500 410 C 540 410, 540 360, 560 360" fill="none" stroke="#2e7d32" stroke-width="4"/>
+  <g font-size="12" paint-order="stroke" stroke="#fff" stroke-width="5" stroke-linejoin="round">
+    <!-- left column, from the USB-C end -->
+    <circle cx="245" cy="110" r="6" fill="#ddd" stroke="#333"/><text x="215" y="114" text-anchor="end">D0 / A0</text>
+    <circle cx="245" cy="150" r="6" fill="#ddd" stroke="#333"/><text x="215" y="154" text-anchor="end">D1 / A1</text>
+    <circle cx="245" cy="190" r="6" fill="#ddd" stroke="#333"/><text x="215" y="194" text-anchor="end">D2 / A2</text>
+    <circle cx="245" cy="230" r="6" fill="#ddd" stroke="#333"/><text x="215" y="234" text-anchor="end">D3 / A3</text>
+    <circle cx="245" cy="270" r="6" fill="#ddd" stroke="#333"/><text x="215" y="274" text-anchor="end">D4 / SDA</text>
+    <circle cx="245" cy="310" r="6" fill="#ddd" stroke="#333"/><text x="215" y="314" text-anchor="end">D5 / SCL</text>
+    <circle cx="245" cy="350" r="8" fill="#2e7d32" stroke="#000" stroke-width="2"/><text x="215" y="354" text-anchor="end" font-weight="bold">D6 / GP0</text>
+    <!-- right column, from the USB-C end -->
+    <circle cx="365" cy="110" r="6" fill="#ddd" stroke="#333"/><text x="395" y="114">5V</text>
+    <circle cx="365" cy="150" r="8" fill="#000" stroke="#000" stroke-width="2"/><text x="395" y="154" font-weight="bold">GND</text>
+    <circle cx="365" cy="190" r="6" fill="#ddd" stroke="#333"/><text x="395" y="194">3V3</text>
+    <circle cx="365" cy="230" r="6" fill="#ddd" stroke="#333"/><text x="395" y="234">D10 / MOSI</text>
+    <circle cx="365" cy="270" r="6" fill="#ddd" stroke="#333"/><text x="395" y="274">D9 / MISO</text>
+    <circle cx="365" cy="310" r="6" fill="#ddd" stroke="#333"/><text x="395" y="314">D8 / SCK</text>
+    <circle cx="365" cy="350" r="8" fill="#eee" stroke="#000" stroke-width="2"/><text x="395" y="354" font-weight="bold">D7 / GP1</text>
+  </g>
+  <!-- wires: GND from the right column, around the labels, to the pigtail -->
+  <!-- pigtail -->
+  <rect x="560" y="290" width="185" height="90" rx="6" fill="#eee" stroke="#333"/>
+  <text x="652" y="282" text-anchor="middle" font-size="12">USB-C plug (into the FM-1)</text>
+  <text x="568" y="310" font-size="12" fill="#c00">red: VBUS, NOT connected</text>
+  <text x="568" y="334" font-size="12">black: GND</text>
+  <text x="568" y="349" font-size="12">white: D-</text>
+  <text x="568" y="364" font-size="12">green: D+</text>
+  <!-- legend under the board -->
+  <g font-size="13">
+    <text x="20" y="450">green  D+  to  D6 (GP0)</text>
+    <text x="20" y="470">white  D-  to  D7 (GP1)</text>
+    <text x="20" y="490">black  GND  to  GND (second pin from the USB-C end, 5V side)</text>
+    <text x="20" y="510" fill="#c00">red  VBUS  to nothing: tape it off</text>
+  </g>
+  <g font-size="12" fill="#555">
+    <text x="420" y="450">D6 and D7: the two pins farthest from the USB-C, one per edge.</text>
+    <text x="420" y="470">FM-1 switched OFF while wiring. Charge it fully first.</text>
+    <text x="420" y="490">Swapped D+/D- harms nothing: the FM-1 is just not detected.</text>
+  </g>
+</svg>

@@ -9,3 +9,5 @@ __pycache__/
 .DS_Store
 *.bin
 *.fwsc
+transporter/fm1_transporter.uf2
+transporter/fm1_transporter.uf2.tmp
