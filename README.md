@@ -24,10 +24,14 @@ This tool is for you if **all** of these are true:
 `WL82 UBOOT1.00` is the boot mode built into the chip's mask ROM (the FM-1 is a JieLi WL82 /
 AC791N). An update cannot erase it, and from it the flash can be read and rewritten.
 
-**Not covered:** if your FM-1 never shows up as `WL82 UBOOT1.00`, this tool cannot reach it.
-The hardware route is the **FM-1 Transporter** (an RP2040 board on the USB data lines that
-forces the chip into that mode): <https://github.com/kurogedelic/FM-1-transporter>.
-Damage to the boot head (`0x0000`-`0x3FFF`) is not covered either: this tool never writes it.
+**If your FM-1 never shows up as `WL82 UBOOT1.00`** (nothing on USB at all, in any mode), this
+tool cannot reach it. The hardware route is the **FM-1 Transporter** (a Seeed XIAO RP2040 on the
+USB data lines that forces the chip into that mode): <https://github.com/kurogedelic/FM-1-transporter>.
+This repository has the step-by-step procedure for it, the parts, the wiring and a script that
+automates it: **[TRANSPORTER-GUIDE.md](TRANSPORTER-GUIDE.md)** and `fm1_transporter_recover.py`
+(it works on macOS, Linux and Windows: the Transporter is a serial port, no SCSI needed). That is
+how the author's own unit came back on 2026-10-09 after an interrupted update.
+Damage to the boot head (`0x0000`-`0x3FFF`) is not covered by either route: nothing here writes it.
 
 ## What it does
 
@@ -72,6 +76,24 @@ why). Dry runs can inject faults: `--mock-flaky read|write|write-always`.
 
 Exit codes: 0 done, 1 refused or failed with nothing written, 2 unsupported platform,
 3 the write could not be verified (**do not power off**, run `restore` again).
+
+### The Transporter route: `fm1_transporter_recover.py`
+
+For a unit with no USB device at all, through the [FM-1 Transporter](TRANSPORTER-GUIDE.md).
+Needs pyserial (`pip3 install pyserial`); macOS, Linux or Windows.
+
+| Command | What it does |
+|---|---|
+| `flash-xiao FILE.uf2` | puts the XIAO RP2040 into its `RPI-RP2` boot disk (the 1200-baud touch, or hold BOOT yourself), copies the Transporter firmware, waits for it to come back |
+| `status` / `info` | waits for the Transporter's data port and for the FM-1 to answer the USB_KEY; `info` requires chip key `0x980F` and flash ID `0x856014` |
+| `rekey` | reboots the Transporter into USB_KEY mode (then switch the FM-1 off and on) |
+| `dump DIR [--v15 FM-1.fwsc] [--package X.fwsc ...]` | reads the whole 1 MiB twice, compares, saves one dump, and prints the analysis (head, app sectors per package, torn sectors, the staged loader, the update records, the data objects) |
+| `analyse DUMP.bin [--v15 ...] [--package ...]` | the same analysis offline, on a saved dump |
+| `restore PACKAGE.fwsc --ref DUMP.bin [--write] [--yes] [--verify-v15]` | dry run unless `--write`: re-reads the flash (it must equal the dump), writes only the differing 4 KiB sectors of `0x4000..0x92FFF`, each erased, written and read back by the Transporter, then a final full read must equal the expected image. Type `WRITE` to confirm |
+| `recover PACKAGE.fwsc [--out DIR]` | `info`, `dump`, the dry run, the confirmation, the write, the power-cycle instructions |
+
+`--dry-run` drives an in-memory mock Transporter; `--mock-flash DUMP.bin` seeds it from a real
+dump, to rehearse the whole flow without hardware. Exit codes as above.
 
 ## Requirements
 
@@ -191,8 +213,12 @@ known to carry data:
 4. **Three quick restarts.** Switch on, wait 10 s, off; on, wait 10 s, off; on. If each boot was
    a crash, the third one lands in ROM boot. (This is also how a unit can get there by accident.)
 5. If after all that nothing with vendor id 4C4A ever appears, the chip is not reaching ROM boot
-   over USB and this tool cannot help. The hardware route is the
-   [FM-1 Transporter](https://github.com/kurogedelic/FM-1-transporter).
+   over USB and `fm1_unbrick.py` cannot help. The hardware route is the
+   [FM-1 Transporter](https://github.com/kurogedelic/FM-1-transporter): see
+   [TRANSPORTER-GUIDE.md](TRANSPORTER-GUIDE.md) (parts, wiring, `fm1_transporter_recover.py`).
+   This is exactly what an update interrupted mid-write by the FM-1 itself (a flat battery) looks
+   like: the half-written firmware hangs before any of its own safety code runs, and the chip's
+   SPL does not fall back to the update loader on a power-on. Holds and restarts cannot help there.
 
 
 - **"No WL82 UBOOT1.00 device found"**: switch the FM-1 on, use a data cable, plug in directly.
@@ -231,7 +257,9 @@ python3 -m pytest -q          # or: python3 -m unittest -v
 ```
 
 They cover the `.fwsc` extractor (against a real package and an independent black-box
-implementation when available), a `MockUboot` flash with NOR erase/program semantics and
+implementation when available), the Transporter script against an in-memory mock Transporter
+(`tests/test_transporter.py`: the dump, the analysis on synthetic half-written flashes, the dry
+run, the write and its refusals), a `MockUboot` flash with NOR erase/program semantics and
 fault injection (a corrupted backup read must abort; a corrupted write must be retried once;
 a dead cell must stop with the do-not-power-off message), the device finders on canned
 Windows and Linux outputs, the refusals (two devices, wrong chip key or flash ID, damaged V15,
@@ -254,7 +282,8 @@ mock SCSI device through loader upload, backup, write and verify.
 - **Leo Kuroshita (kurogedelic) / Hügelton Instruments**, credited by the guide: the
   [Felucca](https://github.com/hugelton/Felucca) documentation of the package format and flash
   layout (including "nothing below 0x4000"), and the
-  [FM-1 Transporter](https://github.com/kurogedelic/FM-1-transporter).
+  [FM-1 Transporter](https://github.com/kurogedelic/FM-1-transporter) (MIT): the board firmware
+  and line protocol that `fm1_transporter_recover.py` talks to.
 
 ## Licence
 
