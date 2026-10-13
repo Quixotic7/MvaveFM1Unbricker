@@ -264,7 +264,7 @@ class BackupTests(Workdir):
         with self.assertLogs(fu.log, "INFO") as logs:
             path, data = fu.take_backup(dev, Path("bk"))
         self.assertEqual(path.read_bytes(), bytes(m.flash))
-        self.assertTrue(path.name.startswith("fm1-flash-backup-"))
+        self.assertEqual(path.name, "full-flash-before.bin")
         self.assertIn(hashlib.sha256(m.flash).hexdigest(), "\n".join(logs.output))
         self.assertEqual(m.ops, [])
 
@@ -302,8 +302,13 @@ class RestoreTests(Workdir):
         before = bytes(m.flash)
         self.assertEqual(fu.main(["restore", str(path), "--yes"], device=dev), 0)
         self.check_restored(m, before, image)
-        self.assertEqual(len(list(Path("backups").glob("fm1-flash-backup-*.bin"))), 1)
-        self.assertEqual(Path(next(Path("backups").glob("*.bin"))).read_bytes(), before)
+        (session,) = Path("backups").iterdir()
+        self.assertEqual((session / "full-flash-before.bin").read_bytes(), before)
+        self.assertEqual(sorted(p.name for p in session.iterdir()),
+                         ["backup.json", "full-flash-before.bin", "recovery-result.json",
+                          "unbrick.log"])
+        self.assertTrue(json.loads((session / "recovery-result.json").read_text())
+                        ["firmware_region_verified"])
         log_text = next(Path("logs").glob("unbrick-*.log")).read_text()
         self.assertIn(hashlib.sha256(image[0x4000:0x93000]).hexdigest(), log_text)
         self.assertIn("byte-for-byte identical", log_text)
@@ -418,7 +423,7 @@ class RestoreTests(Workdir):
     def test_cli_dry_run(self):
         path, image = self.package()
         self.assertEqual(fu.main(["restore", str(path), "--yes", "--dry-run"]), 0)
-        self.assertTrue(list(Path("backups").glob("*-dryrun.bin")))
+        self.assertTrue(list(Path("backups").glob("*-dryrun/full-flash-before.bin")))
         self.assertIn("MOCK", self.out.getvalue())
         self.assertEqual(fu.main(["restore", str(path), "--yes", "--dry-run",
                                   "--mock-flaky", "write"]), 0)
@@ -546,6 +551,7 @@ class MockScsi:
     def __init__(self, jl, uboot: fu.MockUboot, blob: bytes):
         self.jl, self.m, self.blob = jl, uboot, blob
         self.ram = {}
+        self.retained = None       # bytes at 0x1C7C000, or None: the ROM refuses the read
         self.loader_running = False
         self.jump_arg = None
         self.closed = False
@@ -582,6 +588,10 @@ class MockScsi:
                 self.jump_arg = ln
                 self.loader_running = True
                 self._resp(data_in, cmd)
+                return 0
+            if cmd == 0xFD07 and self.retained is not None:
+                assert (addr, ln) == (0x1C7C000, 512)
+                data_in[:] = self.jl.cipher_bytes(self.jl.jl_crc_cipher, self.retained)
                 return 0
             raise self.jl.SCSIException("UBOOT: unsupported command %04X" % cmd)
         if cmd == 0xFC09:
@@ -634,6 +644,27 @@ class ProtocolTests(Workdir):
         self.assertEqual(m.flash[0x93000:], before[0x93000:])
         self.assertEqual(m.lowest_touched(), 0x4000)
         self.assertTrue(scsi.closed)
+
+    def test_retained_ram_saved_before_loader(self):
+        import struct
+        crash = struct.pack("<16I", 0x43525348, 3, 2, 0x02012345, *range(12)).ljust(512, b"\xA5")
+        scsi = MockScsi(self.jl, fu.MockUboot(), self.blob)
+        scsi.retained = crash
+        dev = fu.open_real_device("/dev/sg9", self.jl, scsi=scsi)
+        self.assertEqual(dev.retained_ram, crash)
+        self.assertEqual(fu.main(["backup", "out"], device=dev), 0)
+        (session,) = Path("out").iterdir()
+        self.assertEqual((session / "retained-ram.bin").read_bytes(), crash)
+        self.assertEqual(sorted(p.name for p in session.iterdir()),
+                         ["backup.json", "full-flash-before.bin", "retained-ram.bin",
+                          "unbrick.log"])
+
+    def test_retained_ram_refused_is_not_fatal(self):
+        scsi = MockScsi(self.jl, fu.MockUboot(), self.blob)
+        dev = fu.open_real_device("/dev/sg9", self.jl, scsi=scsi)
+        self.assertIsNone(dev.retained_ram)
+        self.assertTrue(scsi.loader_running)
+        dev.close()
 
     def test_non_wl82_device_untouched(self):
         m = fu.MockUboot()

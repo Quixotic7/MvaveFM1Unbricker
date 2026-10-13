@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -40,7 +41,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.1.0"
 
 # --------------------------------------------------------------------------
 # Flash layout of the FM-1 (1 MiB SPI NOR flash)
@@ -56,6 +57,15 @@ FW_END = FW_START + FW_LEN     # 0x93000 (exclusive)
 
 EXPECTED_CHIP_KEY = 0x980F
 EXPECTED_FLASH_ID = 0x856014   # 1 MiB SPI NOR, as reported by the FM-1
+
+# RAM the previous firmware run left behind, readable from the ROM until the
+# loader starts. Melodee keeps its crash record (fm1_crash_t, "CRSH") here; its
+# own fm1-recover saves the same 512 bytes as retained-ram.bin.
+RETAINED_RAM_ADDR = 0x1C7C000
+RETAINED_RAM_LEN = 512
+MELODEE_CRASH_MAGIC = 0x43525348
+MELODEE_CRASH_FIELDS = ("magic", "count", "vec", "pc", "rets", "emu", "dbg", "sp", "psr",
+                        "icfg", "uptime_ms", "etm0", "etm1", "etm2", "etm3", "early")
 
 DEVICE_VENDOR = "WL82"
 DEVICE_PRODUCT = "UBOOT1.00"
@@ -478,8 +488,10 @@ class Fm1Device:
     """
 
     def __init__(self, path, ldr, vendor=DEVICE_VENDOR, product=DEVICE_PRODUCT,
-                 io_max=512, closer=None, mock=False):
+                 io_max=512, closer=None, mock=False, retained_ram=None):
         self.path, self.ldr, self.vendor, self.product = path, ldr, vendor, product
+        self.retained_ram = retained_ram
+        self.session = None        # this run's folder (session_dir)
         self.io_max = io_max
         self.mock = mock
         self._closer = closer
@@ -834,6 +846,77 @@ def upload_loader(jl, scsi, chipname="wl82"):
     log.info("USB loader uploaded and running (%s, 0x%X)", spec["file"], spec["address"])
 
 
+def read_retained_ram(jl, scsi):
+    """Read the retained RAM from the ROM, before the loader is uploaded.
+
+    Diagnostic only (nothing is written): a failure is logged and ignored.
+    The WL82 ROM returns memory MengLi-scrambled (chips.yaml,
+    memory-rw-mengli-crypt), as it expects the loader upload.
+    """
+    try:
+        data = bytes(jl.JL_UBOOT(scsi).mem_read(RETAINED_RAM_ADDR, RETAINED_RAM_LEN))
+        if len(data) != RETAINED_RAM_LEN:
+            raise UnbrickError("short read: %d bytes" % len(data))
+        return bytes(jl.cipher_bytes(jl.jl_crc_cipher, data))
+    except Exception as e:
+        log.warning("Could not read the retained RAM (%s); continuing without it", e)
+        return None
+
+
+_session = None                # the folder of the current main() run, for the log copy
+
+
+def session_dir(dev: Fm1Device, outdir: Path) -> Path:
+    """This run's folder under outdir: everything worth sending lands here.
+
+    The file names are those of Melodee's fm1-recover (retained-ram.bin,
+    full-flash-before.bin, backup.json, recovery-result.json), plus unbrick.log.
+    """
+    global _session
+    if dev.session is None:
+        outdir.mkdir(parents=True, exist_ok=True)
+        stem = "fm1-recovery-" + timestamp() + ("-dryrun" if dev.mock else "")
+        dev.session = unique_path(outdir, stem, "")
+        dev.session.mkdir()
+        _session = dev.session
+    return dev.session
+
+
+def durable_write(path: Path, data: bytes):
+    with open(str(path), "xb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def write_report(dev: Fm1Device, name: str, report: dict):
+    durable_write(dev.session / name, (json.dumps(report, indent=2) + "\n").encode())
+
+
+def save_retained_ram(dev: Fm1Device, outdir: Path):
+    """Save what read_retained_ram() got, for whoever investigates the brick."""
+    data = dev.retained_ram
+    if data is None:
+        return None
+    try:
+        path = session_dir(dev, outdir) / "retained-ram.bin"
+        durable_write(path, data)
+    except OSError as e:
+        log.warning("Could not save the retained RAM (%s); continuing", e)
+        return None
+    dev.retained_ram = None
+    log.info("Retained RAM 0x%X+0x%X saved: %s", RETAINED_RAM_ADDR, RETAINED_RAM_LEN, path)
+    log.info("  sha256 %s", sha256(data))
+    words = struct.unpack_from("<%dI" % len(MELODEE_CRASH_FIELDS), data)
+    if words[0] == MELODEE_CRASH_MAGIC:
+        log.info("  Melodee crash record: %s", " ".join(
+            "%s=%s" % (n, v if n in ("count", "vec", "uptime_ms", "early") else "0x%08X" % v)
+            for n, v in zip(MELODEE_CRASH_FIELDS[1:], words[1:])))
+    else:
+        log.info("  no Melodee crash record (no CRSH magic)")
+    return path
+
+
 def open_real_device(path, jl, scsi=None, wait=10.0) -> Fm1Device:
     if scsi is None:
         if jl.SCSIDev is None:
@@ -856,7 +939,9 @@ def open_real_device(path, jl, scsi=None, wait=10.0) -> Fm1Device:
         if vendor.upper() != DEVICE_VENDOR:
             raise SafetyError("%s answers as %r, not %s; this is not an FM-1 in UBOOT mode. "
                               "Not touching it." % (path, vendor, DEVICE_VENDOR))
+        retained = None
         if product == DEVICE_PRODUCT:
+            retained = read_retained_ram(jl, scsi)
             upload_loader(jl, scsi, vendor.lower())
         else:
             log.info("Device does not report %s; checking whether the loader already runs",
@@ -873,7 +958,8 @@ def open_real_device(path, jl, scsi=None, wait=10.0) -> Fm1Device:
             io_max = 512
         if not 16 <= io_max <= 0xFFFF:
             io_max = 512
-        return Fm1Device(path, ldr, vendor, product, io_max, closer=scsi.close)
+        return Fm1Device(path, ldr, vendor, product, io_max, closer=scsi.close,
+                         retained_ram=retained)
     except BaseException:
         scsi.close()
         raise
@@ -997,18 +1083,34 @@ def take_backup(dev: Fm1Device, outdir: Path, packages=()):
             "the two backup reads DIFFER (%d bytes, first at 0x%X): the USB connection is "
             "not reliable. Nothing was written. Use another (data) cable or port, plug the "
             "FM-1 in directly (no hub) and try again." % (len(diffs), diffs[0]))
-    stem = "fm1-flash-backup-" + timestamp() + ("-dryrun" if dev.mock else "")
-    path = unique_path(outdir, stem, ".bin")
-    with open(str(path), "xb") as f:
-        f.write(a)
-        f.flush()
-        os.fsync(f.fileno())
+    path = session_dir(dev, outdir) / "full-flash-before.bin"
+    durable_write(path, a)
     if path.read_bytes() != a:
         raise UnbrickError("the backup file %s does not read back correctly; check the disk"
                            % path)
     log.info("Backup OK   %s", path)
     log.info("  sha256 %s (both reads identical)", sha256(a))
     analyse_dump(a, packages)
+    ram = dev.session / "retained-ram.bin"
+    sectors = range(0, FW_LEN, SECTOR_SIZE)
+    dev.report = {
+        "tool": "MvaveFM1Unbricker fm1_unbrick.py " + TOOL_VERSION,
+        "device": {"vendor": dev.vendor, "product": dev.product},
+        "chip_key": "0x%04x" % dev.chip_key(),
+        "flash_id": "0x%06x" % dev.flash_id(),
+        "full_backup": path.name,
+        "backup_sha256": sha256(a),
+        "retained_ram": ram.name if ram.is_file() else None,
+        "retained_ram_sha256": sha256(ram.read_bytes()) if ram.is_file() else None,
+        "packages": [{
+            "package": pkg.path.name, "product": pkg.identity, "kind": pkg.kind,
+            "package_sha256": pkg.file_sha256,
+            "application_sectors_differ": sum(
+                1 for i in sectors if a[FW_START + i:FW_START + i + SECTOR_SIZE]
+                != pkg.firmware[i:i + SECTOR_SIZE]),
+        } for pkg in packages],
+    }
+    write_report(dev, "backup.json", dev.report)
     return path, a
 
 
@@ -1092,6 +1194,8 @@ def cmd_find(args):
 def with_device(args, fn, device=None):
     dev = device or connect(args)
     try:
+        # Saved by every command: once the loader runs, the ROM read is gone.
+        save_retained_ram(dev, Path(getattr(args, "dir", None) or "backups"))
         return fn(dev)
     finally:
         dev.close()
@@ -1164,19 +1268,27 @@ def cmd_restore(args, device=None):
             "",
         ], "WRITE")
         log.info("Step 5/6: write + verify. Do not unplug anything now.")
+        def result(verified, error=None):
+            write_report(dev, "recovery-result.json", dict(
+                dev.report, written_package=pkg.path.name, written_range="0x%x..0x%x"
+                % (FW_START, FW_END - 1), firmware_region_verified=verified, error=error))
         try:
             ok = write_and_verify(dev, pkg.firmware)
         except KeyboardInterrupt:
             log.error("Interrupted during the write.")
             log.error(DANGER_TEXT % backup_path)
+            result(False, "interrupted")
             return EXIT_DANGER
         except Exception as e:
             log.error("Write failed: %s", e)
             log.error(DANGER_TEXT % backup_path)
+            result(False, str(e))
             return EXIT_DANGER
         if not ok:
             log.error(DANGER_TEXT % backup_path)
+            result(False, "read-back mismatch after two attempts")
             return EXIT_DANGER
+        result(True)
         log.info("Step 6/6: restored %s (%s), verified byte for byte.", pkg.identity,
                  pkg.description)
         log.info(DONE_TEXT)
@@ -1248,6 +1360,8 @@ def build_parser():
 
 
 def main(argv=None, device=None):
+    global _session
+    _session = None
     args = build_parser().parse_args(argv)
     log_path = setup_logging(args.command, Path(args.log_dir))
     log.debug("args %r", vars(args))
@@ -1273,7 +1387,16 @@ def main(argv=None, device=None):
         return EXIT_FAIL
     finally:
         log.info("Log: %s", log_path)
+        if _session is not None:
+            log.info("Everything from this run is in one folder: %s", _session.resolve())
+            log.info("To report a brick, zip that folder and send it (it holds your flash "
+                     "contents, including on-device songs and sounds).")
         close_logging()
+        if _session is not None:
+            try:
+                shutil.copyfile(str(log_path), str(_session / "unbrick.log"))
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

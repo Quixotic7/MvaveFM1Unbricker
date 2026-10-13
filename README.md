@@ -42,10 +42,18 @@ Damage to the boot head (`0x0000`-`0x3FFF`) is not covered by either route: noth
    the UFW entry list) and checks the official V15 hash `6edf3c37…58a8255686` of that region. A file that says it is V15 but has another hash is refused.
 2. **Device**: finds exactly one `WL82 UBOOT1.00` USB disk (it refuses if there are none or
    several), checks that it answers as `WL82`, uploads jl-uboot-tool's wl82 USB loader, and
-   requires chip key `0x980F` and flash ID `0x856014`.
+   requires chip key `0x980F` and flash ID `0x856014`. Just before the loader starts it also
+   reads 512 bytes of RAM at `0x1C7C000` (where Melodee leaves its crash record) and saves
+   them as `retained-ram.bin` in this run's folder (see step 3). This is read-only and
+   optional: if the read fails the tool carries on.
 3. **Backup** (mandatory): reads the whole 1 MiB flash **twice**, compares the two reads,
-   saves `backups/fm1-flash-backup-YYYYMMDD-HHMMSS.bin`, and prints its sha256 and what it
-   found (for example "firmware sectors identical 143/143" against the package).
+   saves `backups/fm1-recovery-YYYYMMDD-HHMMSS/full-flash-before.bin`, and prints its sha256
+   and what it found (for example "firmware sectors identical 143/143" against the package).
+   That folder collects everything from the run: `full-flash-before.bin`, `retained-ram.bin`,
+   `backup.json`, `recovery-result.json` (after a write) and `unbrick.log`. They are the same
+   files Melodee's `fm1-recover` produces: if your unit was bricked by Melodee, zip the folder
+   and send it to the Melodee developer. It contains your whole flash, on-device songs and
+   sounds included.
 4. **Confirmation**: shows device, identity, size and address, and asks you to type `WRITE`.
 5. **Write**: erases and writes exactly `0x4000..0x92FFF`, then reads it back and compares
    byte for byte. On a mismatch it rewrites once; if that fails too it stops and tells you
@@ -155,7 +163,7 @@ sudo .venv/bin/python fm1_unbrick.py restore FM-1.fwsc
 ```
 
 Type `WRITE` when asked. When it says **Done**: unplug USB, switch the FM-1 off, wait 5 seconds,
-switch it on. Keep the file in `backups/`: if you used Felucca or ChoralRoot, your on-device
+switch it on. Keep the folder in `backups/`: if you used Felucca or ChoralRoot, your on-device
 projects and settings are in it.
 
 Want to look before you leap? `py fm1_unbrick.py restore FM-1.fwsc --dry-run` runs the
