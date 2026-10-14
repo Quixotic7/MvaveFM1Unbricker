@@ -13,6 +13,7 @@ import os
 import random
 import struct
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -645,7 +646,17 @@ class Script:
         return self.answers.pop(0)
 
 
-class WizardTests(Base):
+class NoV15Search:
+    """Wizard tests drive the V15 prompt; keep the auto-find out of the way."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(tr, "v15_search_dirs", return_value=[])
+        p.start()
+        self.addCleanup(p.stop)
+
+
+class WizardTests(NoV15Search, Base):
 
     def setUp(self):
         super().setUp()
@@ -720,7 +731,7 @@ class WizardTests(Base):
 
 
 @unittest.skipUnless(REAL_DUMP.is_file() and V15_FWSC.is_file(), "real dump / V15 not available")
-class WizardRealTests(Base):
+class WizardRealTests(NoV15Search, Base):
 
     def test_wizard_real_v15_and_dump(self):
         uf2 = Path("none.uf2")
@@ -740,6 +751,106 @@ class WizardRealTests(Base):
         self.assertIn("resume state intact", text)
         self.assertIn("Final full read EQUALS the expected image", text)
         self.assertIn("Step 6 of 6: finish", text)
+
+
+# --------------------------------------------------------------------------
+# console drain and V15 auto-find
+# --------------------------------------------------------------------------
+
+def port_info(device, serial="X1"):
+    return mock.Mock(device=device, serial_number=serial)
+
+
+class FakeConsole:
+    """A serial port that yields chunks, then raises (unplugged)."""
+
+    def __init__(self, chunks, fail=True):
+        self.chunks, self.fail, self.closed = list(chunks), fail, False
+
+    def read(self, n):
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.fail:
+            raise OSError("device disconnected")
+        time.sleep(0.01)
+        return b""
+
+    def close(self):
+        self.closed = True
+
+
+class ConsoleDrainTests(Base):
+
+    def test_console_port_selection(self):
+        data = "/dev/cu.usbmodem10334403"
+        con = "/dev/cu.usbmodem10334401"
+        self.assertEqual(tr.console_port(data, [port_info(con), port_info(data)]), con)
+        # another RP2040 board: pick the one with the data port's serial number
+        self.assertEqual(tr.console_port(data, [port_info("/dev/other", "Y"), port_info(con),
+                                                port_info(data)]), con)
+        self.assertIsNone(tr.console_port(data, [port_info(data)]))
+        self.assertIsNone(tr.console_port(data, [port_info("/a", None), port_info("/b", None),
+                                                 port_info(data, None)]))
+
+    def test_drain_survives_replug_and_logs_milestones(self):
+        ports = [FakeConsole([b"KEY: 3 packets\nAC", b"K 1\nPULSE: D+ released after 9 ms\n"]),
+                 FakeConsole([b"UBOOT READY: ok\n"], fail=False)]
+        opened = []
+
+        def opener(path):
+            if not ports:
+                raise OSError("gone")
+            opened.append(path)
+            return ports.pop(0)
+        with mock.patch.object(tr.ConsoleDrain, "RETRY", 0.01), \
+                self.assertLogs(tr.log, "DEBUG") as logs:
+            d = tr.ConsoleDrain("/data", "/con", find=lambda: "/con2", opener=opener).start()
+            deadline = time.monotonic() + 3
+            while not d.uboot_ready and time.monotonic() < deadline:
+                time.sleep(0.01)
+            d.stop()
+        self.assertTrue(d.uboot_ready)
+        self.assertFalse(d.released)
+        self.assertFalse(d.thread.is_alive())
+        self.assertEqual(opened, ["/con", "/con"])
+        info = "\n".join(r.getMessage() for r in logs.records if r.levelname == "INFO")
+        self.assertIn("Transporter: ACK 1", info)
+        self.assertIn("Transporter: UBOOT READY", info)
+        self.assertNotIn("KEY: 3 packets", info)          # DEBUG only
+        self.assertIn("console: KEY: 3 packets", "\n".join(logs.output))
+
+    def test_dropped_uboot_message(self):
+        t, m = self.transporter()
+        d = tr.ConsoleDrain("/data", "/con", opener=lambda p: None)
+        d.released = True
+        with mock.patch.object(tr, "_drain", d):
+            with self.assertRaises(fu.UnbrickError) as cm:
+                tr.ensure_uboot(t, {"uboot": "0", "v15": "0"})
+        self.assertIn("dropped out of UBOOT", str(cm.exception))
+
+    def test_no_console_warns(self):
+        with mock.patch.object(tr, "console_port", return_value=None), \
+                self.assertLogs(tr.log, "WARNING") as logs:
+            self.assertIsNone(tr.start_console_drain("/data"))
+        self.assertIn("could not identify the Transporter's console port", logs.output[0])
+
+
+class FindV15Tests(Base):
+
+    def test_single_genuine_v15_is_found(self):
+        v15, _ = self.pkg("FM-1.fwsc", 3, identity="FM-1_015")
+        self.pkg("ChoralRoot.fwsc", 4)
+        sha = fu.Package.load(v15).firmware_sha256
+        with mock.patch.object(fu, "V15_FLASH_FW_SHA256", sha), \
+                mock.patch.object(tr, "v15_search_dirs", return_value=[Path.cwd(), Path.cwd()]):
+            self.assertEqual(Path(tr.find_v15()).resolve(), Path(v15).resolve())
+            self.assertEqual(Path(tr.v15_or_found("missing.fwsc")).resolve(),
+                             Path(v15).resolve())
+            self.assertEqual(tr.v15_or_found(str(v15)), str(v15))
+            Path("copy.fwsc").write_bytes(Path(v15).read_bytes())
+            self.assertIsNone(tr.find_v15())                 # ambiguous: ask
+        with mock.patch.object(tr, "v15_search_dirs", return_value=[Path.cwd()]):
+            self.assertIsNone(tr.find_v15())                 # none genuine
 
 
 if __name__ == "__main__":

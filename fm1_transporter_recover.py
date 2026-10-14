@@ -43,6 +43,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 import types
 import zlib
@@ -520,6 +521,7 @@ def connect(args):
         t = probe_port(args.port)
         if t is not None:
             log.info("Transporter data port %s", t.port)
+            start_console_drain(t.port)
             return t
         if time.monotonic() >= deadline:
             raise fu.UnbrickError(
@@ -530,6 +532,141 @@ def connect(args):
             log.info("  waiting for the Transporter data port ...")
             next_hint += HINT_EVERY
         time.sleep(0.5)
+
+
+# --------------------------------------------------------------------------
+# Console drain: the Transporter's console CDC port must be read, or its
+# output backs up and stalls the RP2040 during the timing-critical UBOOT
+# handshake (seen on hardware: ACK, "D+ released", then no device mounted).
+# --------------------------------------------------------------------------
+
+CONSOLE_MILESTONES = ("ACK", "D+ released", "handing off", "UBOOT READY", "JL: loader running")
+
+
+def console_port(data_port, infos=None):
+    """The Transporter's other VID 2E8A CDC port (the console), or None."""
+    try:
+        infos = rp2_ports() if infos is None else infos
+    except Exception as e:
+        log.debug("list_ports failed: %s", e)
+        return None
+    data = next((p for p in infos if p.device == data_port), None)
+    others = [p for p in infos if p.device != data_port]
+    if data is not None and data.serial_number:
+        same = [p for p in others if p.serial_number == data.serial_number]
+        if same:
+            others = same
+    return others[0].device if len(others) == 1 else None
+
+
+class ConsoleDrain:
+    """Daemon thread that keeps reading the console port: every line to the
+    log at DEBUG, milestones at INFO. Reopens the port (re-discovering it)
+    after the XIAO reboots or is replugged, until stop()."""
+
+    RETRY = 0.5
+
+    def __init__(self, data_port, path=None, find=None, opener=None):
+        self.data_port, self.path = data_port, path
+        self.find = find or (lambda: console_port(self.data_port))
+        self.opener = opener or (lambda p: _serial().Serial(p, 115200, timeout=0.2))
+        self.stop_event = threading.Event()
+        self.released = False      # "D+ released" seen and no UBOOT READY since
+        self.uboot_ready = False
+        self.opens = 0
+        self.thread = None
+
+    def start(self):
+        self.thread = threading.Thread(target=self._run, name="console-drain", daemon=True)
+        self.thread.start()
+        return self
+
+    def stop(self, timeout=2.0):
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout)
+
+    def _line(self, line):
+        log.debug("console: %s", line)
+        if "D+ released" in line:
+            self.released = True
+        if "UBOOT READY" in line:
+            self.uboot_ready, self.released = True, False
+        if any(m in line for m in CONSOLE_MILESTONES):
+            log.info("  Transporter: %s", line)
+
+    def _open(self):
+        for path in [self.path, self.find()]:
+            if not path:
+                continue
+            try:
+                s = self.opener(path)
+            except Exception as e:      # SerialException is an OSError subclass in pyserial
+                log.debug("console %s not open yet: %s", path, e)
+                continue
+            if self.path != path or self.opens == 0:
+                log.debug("console port %s open", path)
+            self.path = path
+            self.opens += 1
+            return s
+        return None
+
+    def _run(self):
+        while not self.stop_event.is_set():
+            s = self._open()
+            if s is None:
+                self.stop_event.wait(self.RETRY)
+                continue
+            buf = b""
+            try:
+                while not self.stop_event.is_set():
+                    chunk = s.read(4096)
+                    if not chunk:
+                        continue
+                    buf += chunk
+                    *lines, buf = buf.split(b"\n")
+                    for raw in lines:
+                        line = raw.decode("utf-8", "replace").strip()
+                        if line:
+                            self._line(line)
+            except Exception as e:      # port vanished: XIAO rebooted / replugged
+                log.debug("console %s lost: %s; reopening", self.path, e)
+            finally:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+            self.stop_event.wait(self.RETRY)
+
+
+_drain = None
+
+
+def start_console_drain(data_port):
+    """Start (once) reading the console that belongs to data_port."""
+    global _drain
+    if _drain is not None:
+        return _drain
+    path = console_port(data_port)
+    if path is None:
+        log.warning("could not identify the Transporter's console port; continuing without "
+                    "reading it (if the FM-1 stalls after 'D+ released', read it by hand)")
+        return None
+    log.info("Reading the Transporter console %s in the background", path)
+    _drain = ConsoleDrain(data_port, path).start()
+    return _drain
+
+
+def stop_console_drain():
+    global _drain
+    if _drain is not None:
+        _drain.stop()
+        _drain = None
+
+
+DROPPED_UBOOT = ("the FM-1 dropped out of UBOOT during calibration (the Transporter saw 'D+ "
+                 "released' but no UBOOT READY). Switch the FM-1 off, wait 5 seconds, and switch "
+                 "it on again")
 
 
 def wait_status(t: Transporter, wait: float) -> dict:
@@ -562,6 +699,8 @@ def ensure_uboot(t: Transporter, st: dict, timeout=20.0) -> dict:
     if st.get("uboot") == "1":
         return st
     if st.get("v15") != "1":
+        if _drain is not None and _drain.released:
+            raise fu.UnbrickError(DROPPED_UBOOT)
         raise fu.UnbrickError("the Transporter reports no UBOOT and no stock V15. Power-cycle "
                               "the FM-1; if it has no working firmware run `rekey`, then switch "
                               "the FM-1 off and on.")
@@ -608,6 +747,45 @@ def ready(t: Transporter, args) -> dict:
 # --------------------------------------------------------------------------
 # Packages and labels
 # --------------------------------------------------------------------------
+
+def v15_search_dirs():
+    return [Path.cwd(), SCRIPT_DIR]
+
+
+def find_v15():
+    """The single hash-verified official V15 *.fwsc in the cwd or the script's
+    folder, or None (none found, or several different ones)."""
+    found, seen = [], set()
+    for d in v15_search_dirs():
+        for path in sorted(Path(d).glob("*.fwsc")):
+            key = path.resolve()
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                pkg = fu.Package.load(path)
+            except Exception as e:
+                log.debug("%s: %s", path, e)
+                continue
+            if pkg.kind == "official-v15":
+                found.append(path)
+    if len(found) == 1:
+        log.info("Found the official V15 (hash verified): %s", found[0])
+        return str(found[0])
+    if found:
+        log.info("Several official V15 files found (%s); give one explicitly",
+                 ", ".join(map(str, found)))
+    return None
+
+
+def v15_or_found(path, what="--v15"):
+    """path if it names an existing file; else the auto-found V15 (or None)."""
+    if path and Path(path).is_file():
+        return path
+    if path:
+        log.warning("%s %s does not exist; looking for the official V15 nearby", what, path)
+    return find_v15()
+
 
 def load_labelled(v15_path=None, package_paths=(), extra=None):
     """[(label, Package)] for the analysis: --v15 is "V15", others by file stem."""
@@ -1032,7 +1210,12 @@ class Plan:
 
 
 def load_restore_package(path, verify_v15):
-    pkg = fu.Package.load(path)
+    found = v15_or_found(path, "package")
+    if not found:
+        raise fu.UnbrickError("no package given%s, and no single official V15 *.fwsc in this "
+                              "folder or the script's folder; give the package path"
+                              % (" (%s does not exist)" % path if path else ""))
+    pkg = fu.Package.load(found)
     pkg.log_summary()
     pkg.check_writable(False)
     if verify_v15 and pkg.kind != "official-v15":
@@ -1260,9 +1443,14 @@ def cmd_flash_xiao(args):
             raise fu.UnbrickError("no %s disk and no RP2040 serial port (USB VID 2E8A) found. "
                                   "Hold BOOT on the XIAO while plugging it in, then run this "
                                   "again." % RP2_VOLUME)
-        touch_1200(ports[0])
-        log.info("Waiting up to %d s for the %s disk ...", BOOTSEL_WAIT, RP2_VOLUME)
-        vols = wait_for(find_rp2_volumes, BOOTSEL_WAIT)
+        # Only one of the Transporter's two CDC ports (the console, the lower-numbered one on
+        # macOS) honours the 1200-baud touch, and the port order is not fixed: try each in turn.
+        for port in sorted(ports):
+            touch_1200(port)
+            log.info("Waiting up to %d s for the %s disk ...", BOOTSEL_WAIT, RP2_VOLUME)
+            vols = wait_for(find_rp2_volumes, BOOTSEL_WAIT)
+            if vols:
+                break
         if not vols:
             raise fu.UnbrickError("no %s disk appeared within %d s. Hold BOOT on the XIAO while "
                                   "plugging it in, then run this again." % (RP2_VOLUME,
@@ -1295,6 +1483,7 @@ def cmd_flash_xiao(args):
         log.error("No port answers ping: the Transporter firmware is not running.")
         return EXIT_FAIL
     log.info("Transporter data port: %s (the other CDC port is the console)", t.port)
+    start_console_drain(t.port)
     t.close()
     return EXIT_OK
 
@@ -1336,7 +1525,7 @@ def cmd_rekey(args, transporter=None):
 
 
 def cmd_dump(args, transporter=None):
-    labelled, v15 = load_labelled(args.v15, args.package)
+    labelled, v15 = load_labelled(v15_or_found(args.v15), args.package)
 
     def run(t):
         ready(t, args)
@@ -1717,7 +1906,7 @@ class Wizard:
     # steps --------------------------------------------------------------------
 
     def get_v15(self):
-        path = self.args.v15
+        path = v15_or_found(self.args.v15)
         while True:
             if not path:
                 self.say("  The wizard needs the official V15 firmware file, FM-1.fwsc.\n"
@@ -1806,16 +1995,23 @@ class Wizard:
     def step2_connect(self):
         a = self.args
         self.step(2, "wire the XIAO to the FM-1 and switch the FM-1 on", WIRING_TEXT)
-        self.pause("Press Enter when the three wires are connected and the FM-1 is still OFF")
-        self.say("  Now unplug the XIAO from the computer and plug it back in (this restarts\n"
-                 "  the Transporter so it is ready), then switch the FM-1 ON.\n"
-                 "  The FM-1's screen stays dark: that is expected.")
-        self.pause("Press Enter right after you have switched the FM-1 on")
+        self.say("  With the FM-1 still OFF, unplug the XIAO from the computer and plug it\n"
+                 "  back in (this restarts the Transporter so it is ready).")
+        self.pause("Press Enter when the wires are connected, the XIAO is plugged back in and "
+                   "the FM-1 is still OFF")
 
-        def go():
+        def find():
+            # Before the FM-1 is switched on: connect() starts reading the
+            # Transporter's console, which the UBOOT handshake needs.
             if self.t is None:
                 log.info("Looking for the Transporter (up to %d s) ...", a.wait)
                 self.t = connect(a)
+        self.attempt("looking for the Transporter", find, CONNECT_ADVICE)
+        self.say("  Now switch the FM-1 ON. Its screen stays dark: that is expected.")
+        self.pause("Press Enter right after you have switched the FM-1 on")
+
+        def go():
+            find()
             log.info("Waiting for the FM-1 to answer ...")
             try:
                 ready(self.t, a)
@@ -1996,14 +2192,16 @@ def build_parser():
     p.add_argument("dump")
     labels(p)
     p = sp("restore", "write the differing app sectors of PACKAGE (dry run without --write)")
-    p.add_argument("package")
+    p.add_argument("package", nargs="?",
+                   help="the .fwsc (default: the official V15 found next to you / the script)")
     p.add_argument("--ref", required=True, help="full dump; a fresh read must equal it")
     p.add_argument("--write", action="store_true", help="actually write (default: dry run)")
     p.add_argument("--yes", action="store_true", help="skip the typed WRITE confirmation")
     p.add_argument("--verify-v15", action="store_true",
                    help="refuse anything but the verified official V15")
     p = sp("recover", "info + dump + analyse + restore plan + confirmation + write + verify")
-    p.add_argument("package")
+    p.add_argument("package", nargs="?",
+                   help="the .fwsc (default: the official V15 found next to you / the script)")
     p.add_argument("--out", default="backups", help="dump folder (default: ./backups)")
     p.add_argument("--package", dest="extra_package", action="append", default=[],
                    help="extra .fwsc to label app sectors in the analysis (repeatable)")
@@ -2039,6 +2237,7 @@ def main(argv=None, transporter=None, input_fn=None):
         log.error("Interrupted.")
         return EXIT_FAIL
     finally:
+        stop_console_drain()
         log.info("Log: %s", log_path)
         close_logging()
 

@@ -15,16 +15,25 @@ dump showed, and `fm1_transporter_recover.py`, which automates it.
 ## The short version (no toolchain, no expert needed)
 
 1. Buy the two parts below; charge the FM-1 fully.
-2. Download `FM-1.fwsc` (the official V15) from <https://www.m-vave.com/download>.
+2. Download `FM-1.fwsc` (the official V15) from <https://www.m-vave.com/download> and put it in
+   this folder. The script finds it by its hash, so you never type its path.
 3. In this folder:
    ```sh
    python3 fm1_transporter_recover.py setup      # fetches the JieLi loader, builds the Transporter firmware file, installs pyserial
-   python3 fm1_transporter_recover.py wizard --v15 FM-1.fwsc
+   python3 fm1_transporter_recover.py wizard
    ```
    The wizard tells you, step by step, when to plug in the XIAO, how to wire it
    ([picture](transporter/xiao-wiring.svg)), when to switch the FM-1 on, and asks you to type
    `WRITE` before the one step that changes the FM-1. Everything it does is also available as
    separate commands (below) if you prefer to go one step at a time.
+
+   **Switch the FM-1 on only when the wizard says so.** The Transporter has two USB ports, and
+   the first is a console. If nothing reads the console, its output backs up and stalls the
+   UBOOT handshake: the FM-1 answers the key (`ACK`), then drops out (`D+ released after N ms`),
+   and `status` reports `uboot=0` every time. The script reads the console itself from the
+   moment it finds the Transporter, and the wizard asks for the FM-1 to be switched on only after
+   that. If you use the separate commands instead, start the command first, then switch the
+   FM-1 on.
 4. When it says done: switch the FM-1 off, remove the three wires, switch it on. It boots stock
    V15. Install whatever firmware you want the normal way, on a full battery.
 
@@ -125,6 +134,13 @@ afterwards through its own installer, once the unit is alive.
    straight away). Switch the FM-1 **on**: the order matters, the key must be on the lines when
    the chip powers up. If the XIAO was already plugged in for a while, unplug and replug it first
    so it keys from a clean start.
+
+   The script reads the Transporter's console port (the first of its two ports) by itself, in
+   the background, from the moment it finds the XIAO. That matters: if nothing reads the console,
+   its output backs up and stalls the timing of the UBOOT handshake (the console then shows `ACK`,
+   `PULSE: D+ released after N ms` and `HOST: no device mounted yet`). Everything the console
+   prints goes into the log file. The easiest route is `python3 fm1_transporter_recover.py wizard`:
+   it finds the XIAO before it asks you to switch the FM-1 on.
 2. `python3 fm1_transporter_recover.py info` waits for the data port and prints the chip:
    `OK key=980F type=3 id=856014` is an FM-1. Not detected: swap D+/D-, shorten the wires, check
    the charge, read the console port, try `python3 fm1_transporter_recover.py rekey` (the
