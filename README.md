@@ -76,6 +76,8 @@ firmware.
 | `backup DIR` | double-read full backup into `DIR`; `--package X.fwsc` also compares the dump with a package |
 | `extract PACKAGE.fwsc OUT.bin` | writes the firmware region to `OUT.bin` and prints the identity; `--verify-v15` fails unless it is official V15 |
 | `restore PACKAGE.fwsc` | everything above, then write and verify. `--yes` skips the typed confirmation; `--verify-v15` refuses anything but the verified official V15; `--force-write` writes even if the region already matches |
+| `softkey [--port NAME]` | for a unit that still runs: asks its identity over USB-MIDI, then sends the key `F0 22 24 35 7D F7` that drops stock V15 (and the Felucca family) into ROM boot mode (`WL82 UBOOT1.00`). Writes nothing; a power cycle brings it back. Type `UBOOT` to confirm. Works on macOS too (needs `python-rtmidi`, which `setup` installs; Linux falls back to raw ALSA) |
+| `repair-settings --factory DUMP.bin [--package X.fwsc]` | backup, then puts the settings areas `0x93000..0xE8FFF` and `0xFC000..0xFEFFF` back to factory state (the factory settings sector `0x93000` from `DUMP.bin`, the rest erased), sector by sector with read-back, then a final full read. Type `REPAIR` to confirm. See [Settings corrupted after going back to stock](#settings-corrupted-after-going-back-to-stock) |
 
 Options for every command: `--dry-run` (use a mock FM-1: never opens or writes real
 hardware), `--device PATH` (`\\.\PhysicalDriveN` or `/dev/sgN`, only if the scan cannot decide),
@@ -83,7 +85,8 @@ hardware), `--device PATH` (`\\.\PhysicalDriveN` or `/dev/sgN`, only if the scan
 why). Dry runs can inject faults: `--mock-flaky read|write|write-always`.
 
 Exit codes: 0 done, 1 refused or failed with nothing written, 2 unsupported platform,
-3 the write could not be verified (**do not power off**, run `restore` again).
+3 the write could not be verified (**do not power off**, run `restore` again; after
+`repair-settings`: do not use the unit before a successful `repair-settings` run).
 
 ### The Transporter route: `fm1_transporter_recover.py`
 
@@ -122,7 +125,7 @@ dump, to rehearse the whole flow without hardware. Exit codes as above.
 
 **macOS is not supported**: jl-uboot-tool has no macOS SCSI back end. `fm1_unbrick.py` says so
 and exits with code 2. Use any Windows PC or Linux machine, a Raspberry Pi is enough.
-`extract` and every `--dry-run` work on macOS.
+`extract`, `softkey` and every `--dry-run` work on macOS.
 
 ## Getting the official V15 package
 
@@ -206,6 +209,32 @@ Then unplug, switch off, wait 5 s, switch on.
   the SCSI inquiry as `WL82` before anything else is sent.
 - **Cancel Windows' "format disk" dialog.** Never format the `WL82 UBOOT1.00` disk.
 - If verification fails: **do not power off**. Run `restore` again (another cable or port helps).
+
+## Settings corrupted after going back to stock
+
+Felucca-family firmwares (Felucca, ChoralRoot) keep their songs, sounds and settings at
+`0x97000..0xDFFFF`, stage their update loader at `0xE0000`, and keep globals at `0xFC000`. The
+first two are inside stock V15's own settings store (`0x93000..0xE8FFF`), and the installers only
+rewrite the firmware (`0x4000..0x92FFF`). Back on V15, stock reads those leftovers as its own
+settings, and the presets come out corrupted.
+
+1. First try stock's own **System > Reset Patches**.
+2. If that does not help: `python fm1_unbrick.py softkey` (any OS, the FM-1 on its normal
+   screen) drops the unit into ROM boot mode. It stays there while powered, so on a Mac move the
+   cable to a Windows or Linux machine (the step below needs one).
+3. `python fm1_unbrick.py repair-settings --factory DUMP.bin` (administrator PowerShell / sudo).
+   It takes the usual double-read backup, then makes `0x93000..0xE8FFF` and `0xFC000..0xFEFFF`
+   look like a factory unit: the factory settings sector `0x93000` from `DUMP.bin`, everything
+   else there erased. Everything else stays bit for bit as it is: the firmware, the Bluetooth
+   data (`0xE9000`), the factory voices (`0xEA000..0xFBFFF`) and `0xFF000..0xFFFFF` are never
+   written (the tool's write gate refuses them). Songs, sounds and settings in those areas are
+   deleted; the backup keeps them.
+4. Unplug, switch off, wait 5 s, switch on, then reload the banks with System > Reset Patches.
+
+`DUMP.bin` is the `backup` (`full-flash-before.bin`) of a factory-fresh FM-1, taken before any
+custom firmware was installed on it. The tool refuses a dump that is not clean (its sector
+`0x93000` must start with `55 AA AA 55`, and `0x94000..0xE8FFF` and `0xFC000..0xFEFFF` must be
+erased). **Not yet tested on a real corrupted unit**: only against a mock FM-1.
 
 ## Troubleshooting
 

@@ -435,6 +435,157 @@ class RestoreTests(Workdir):
 
 
 # --------------------------------------------------------------------------
+# repair-settings
+# --------------------------------------------------------------------------
+
+def factory_image(seed=21) -> bytes:
+    """A synthetic factory-fresh flash: head/app random, the VM's first sector with
+    the magic and a few bytes, BTIF bytes, USR random, the rest erased."""
+    rnd = random.Random(seed)
+    img = bytearray(b"\xff" * fu.FLASH_SIZE)
+    img[:0x93000] = rnd.randbytes(0x93000)
+    img[0x93000:0x93000 + 245] = fu.VM_MAGIC + rnd.randbytes(241)
+    img[0xE9000:0xE9020] = rnd.randbytes(0x20)
+    img[0xEA000:0xFC000] = rnd.randbytes(0x12000)
+    return bytes(img)
+
+
+def corrupted_image(factory: bytes, seed=22) -> bytes:
+    """The same unit after a Felucca-family firmware and a return to stock."""
+    rnd = random.Random(seed)
+    img = bytearray(factory)
+    img[0x93010:0x93030] = rnd.randbytes(0x20)
+    img[0x97000:0xE0000] = rnd.randbytes(0x49000)
+    img[0xE0000:0xE5000] = rnd.randbytes(0x5000)
+    img[0xFC000:0xFF000] = rnd.randbytes(0x3000)
+    return bytes(img)
+
+
+def in_windows(addr, length):
+    return any(s <= addr and addr + length <= e for s, e in fu.REPAIR_WINDOWS)
+
+
+class RepairSettingsTests(Workdir):
+
+    def setUp(self):
+        super().setUp()
+        self.dump = self.tmp / "factory.bin"     # another factory-fresh unit's backup
+        self.dump.write_bytes(factory_image(seed=99))
+
+    def test_repair_corrupted_unit(self):
+        before = corrupted_image(factory_image())
+        dev, m = self.device(image=before)
+        rc = fu.main(["repair-settings", "--factory", str(self.dump), "--yes"], device=dev)
+        self.assertEqual(rc, 0, self.out.getvalue())
+        factory = self.dump.read_bytes()
+        expected = bytearray(before)
+        expected[0x93000:0xE9000] = factory[0x93000:0xE9000]
+        expected[0xFC000:0xFF000] = b"\xff" * 0x3000
+        self.assertEqual(bytes(m.flash), bytes(expected))
+        self.assertEqual(m.flash[:0x93000], before[:0x93000])
+        self.assertEqual(m.flash[0xE9000:0xFC000], before[0xE9000:0xFC000])
+        self.assertEqual(m.flash[0xFF000:], before[0xFF000:])
+        self.assertTrue(m.ops)
+        self.assertEqual({op[0] for op in m.ops}, {"erase_sector", "write"})
+        self.assertEqual([op for op in m.ops if not in_windows(op[1], op[2])], [])
+        self.assertEqual({op[1] & ~0xFFF for op in m.ops if op[0] == "write"}, {0x93000})
+        (session,) = Path("backups").iterdir()
+        res = json.loads((session / "repair-result.json").read_text())
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["final_sha256"], hashlib.sha256(expected).hexdigest())
+        self.assertEqual(len(res["sectors_changed"]), 1 + 0x49 + 0x5 + 3)
+        self.assertIn("Felucca-family main store", self.out.getvalue())
+
+    def test_clean_unit_writes_nothing(self):
+        self.dump.write_bytes(factory_image())
+        dev, m = self.device(image=factory_image())
+        rc = fu.main(["repair-settings", "--factory", str(self.dump), "--yes"], device=dev)
+        self.assertEqual(rc, 0)
+        self.assertEqual(m.ops, [])
+        self.assertIn("already factory-clean", self.out.getvalue())
+
+    def test_unclean_factory_dump_refused(self):
+        for bad in (corrupted_image(factory_image(seed=99)), factory_image()[:0x80000],
+                    b"\xff" * fu.FLASH_SIZE):
+            self.dump.write_bytes(bad)
+            dev, m = self.device(image=corrupted_image(factory_image()))
+            rc = fu.main(["repair-settings", "--factory", str(self.dump), "--yes"], device=dev)
+            self.assertEqual(rc, 1)
+            self.assertEqual((m.reads, m.ops), (0, []))
+        self.assertIn("not a clean factory dump", self.out.getvalue())
+
+    def test_gates(self):
+        for addr in (0xE9000, 0xEA000, 0xFB000, 0xFF000):
+            with self.assertRaises(fu.SafetyError):
+                fu._check_mutable(addr, 0x1000)
+        with self.assertRaises(fu.SafetyError):
+            fu._check_mutable(0xE8000, 0x2000)          # runs into 0xE9000
+        fu._check_mutable(0x4000, 0x8F000)               # restore's range is fine
+        for addr in (0x92000, 0xE9000, 0xFF000):
+            with self.assertRaises(fu.SafetyError):
+                fu._check_repairable(addr, 0x1000)
+        with self.assertRaises(fu.SafetyError):
+            fu._check_repairable(0x93800, 0x1000)       # not a whole sector
+        fu._check_repairable(0x93000, 0x1000)
+        fu._check_repairable(0xFE000, 0x1000)
+
+    def test_flaky_write_fixed_by_sector_retry(self):
+        image = self.tmp / "unit.bin"
+        image.write_bytes(corrupted_image(factory_image()))
+        rc = fu.main(["repair-settings", "--factory", str(self.dump), "--yes", "--dry-run",
+                      "--mock-image", str(image), "--mock-flaky", "write"])
+        self.assertEqual(rc, 0, self.out.getvalue())
+        self.assertIn("Retrying sector 0x93000 once", self.out.getvalue())
+        self.assertIn("equals the expected image", self.out.getvalue())
+
+
+# --------------------------------------------------------------------------
+# softkey
+# --------------------------------------------------------------------------
+
+class SoftkeyTests(Workdir):
+
+    def run_softkey(self, midi, *extra):
+        with mock.patch.object(fu, "platform_supported", return_value=False):
+            return fu.main(["softkey", "--yes"] + list(extra), midi=midi)
+
+    def test_sends_the_key_as_one_message(self):
+        midi = fu.MockMidi(ports=["IAC Driver Bus 1", "FM-1"])
+        self.assertEqual(self.run_softkey(midi), 0, self.out.getvalue())
+        self.assertEqual(midi.sent, [fu.HS_QUERY, bytes.fromhex("F0 22 24 35 7D F7")])
+        self.assertTrue(midi.closed)
+        self.assertIn("FM-1_015", self.out.getvalue())
+        self.assertIn("move the cable to a Windows or Linux machine", self.out.getvalue())
+
+    def test_port_count_refusals(self):
+        for ports in ([], ["IAC Driver Bus 1"], ["FM-1", "FM-1 #2"]):
+            midi = fu.MockMidi(ports=ports)
+            self.assertEqual(self.run_softkey(midi), 1)
+            self.assertEqual(midi.sent, [])
+        self.assertIn("pass --port", self.out.getvalue())
+
+    def test_identity_refusals(self):
+        midi = fu.MockMidi(identity="ota-FM-1_015")
+        self.assertEqual(self.run_softkey(midi), 1)
+        self.assertNotIn(fu.SOFT_KEY, midi.sent)
+        self.assertIn("update mode", self.out.getvalue())
+        midi = fu.MockMidi(identity=None)
+        self.assertEqual(self.run_softkey(midi), 1)
+        self.assertNotIn(fu.SOFT_KEY, midi.sent)
+        midi = fu.MockMidi(identity=None)
+        self.assertEqual(self.run_softkey(midi, "--i-know"), 0)
+        self.assertIn(fu.SOFT_KEY, midi.sent)
+
+    def test_identity_wire_format(self):
+        self.assertEqual(fu.parse_identity(fu.identity_answer("FM-1_920")), "FM-1_920")
+        self.assertIsNone(fu.parse_identity(fu.HS_QUERY))
+
+    def test_cli_dry_run(self):
+        self.assertEqual(fu.main(["softkey", "--dry-run", "--yes"]), 0)
+        self.assertIn("MOCK", self.out.getvalue())
+
+
+# --------------------------------------------------------------------------
 # device discovery and selection
 # --------------------------------------------------------------------------
 

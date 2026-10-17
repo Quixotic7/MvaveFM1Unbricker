@@ -12,8 +12,14 @@ boot mode through kagaimiq's jl-uboot-tool (MIT), backs up the whole flash
 twice, extracts the firmware region from an FM-1 .fwsc package and writes
 it at 0x4000, then reads it back and compares every byte.
 
+Two helpers for a unit that still runs: `softkey` sends the stock firmware's
+USB-MIDI key that drops it into that boot mode (any OS), and `repair-settings`
+puts the settings areas back to factory state after a custom firmware (stock
+V15 reads that firmware's leftovers as its own settings).
+
 Safety rules, enforced in code:
-  * nothing is ever erased or written below 0x4000 (the boot head);
+  * nothing is ever erased or written below 0x4000 (the boot head), in
+    0xE9000..0xFBFFF (Bluetooth data, factory voices) or 0xFF000..0xFFFFF;
   * "erase chip" is never used;
   * a verified double backup is taken before any write;
   * the chip key (0x980F) and flash ID (0x856014) must match an FM-1.
@@ -41,7 +47,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-TOOL_VERSION = "1.1.0"
+TOOL_VERSION = "1.2.0"
 
 # --------------------------------------------------------------------------
 # Flash layout of the FM-1 (1 MiB SPI NOR flash)
@@ -54,6 +60,31 @@ PROTECTED_END = 0x4000         # 0x0000..0x3FFF = boot head: NEVER erased or wri
 FW_START = 0x4000              # firmware region: app, SDK files, loader
 FW_LEN = 0x8F000
 FW_END = FW_START + FW_LEN     # 0x93000 (exclusive)
+
+# Above the firmware, as a factory-fresh stock unit's dump shows it:
+VM_START = FW_END              # 0x93000..0xE8FFF: stock V15's settings store (JieLi "VM")
+VM_END = 0xE9000
+VM_MAGIC = b"\x55\xAA\xAA\x55"  # factory state: only the sector 0x93000 holds data, it starts so
+BTIF_START = 0xE9000           # 0xE9000..0xE9FFF: per-unit Bluetooth data
+USR_START = 0xEA000            # 0xEA000..0xFBFFF: factory voices / preset resources
+GLOBALS_START = 0xFC000        # 0xFC000..0xFEFFF: erased at the factory; Felucca-family globals
+GLOBALS_END = 0xFF000
+KEY_MAC_START = 0xFF000        # 0xFF000..0xFFFFF: erased at the factory ("key_mac")
+
+# Never erased or written by any command (enforced in _check_mutable).
+NEVER_TOUCH = ((BTIF_START, GLOBALS_START, "the Bluetooth data and factory voices"),
+               (KEY_MAC_START, FLASH_SIZE, "the key_mac area"))
+# The only ranges repair-settings may erase or write (enforced in _check_repairable).
+REPAIR_WINDOWS = ((VM_START, VM_END), (GLOBALS_START, GLOBALS_END))
+# What lives in those windows, for the report before the repair.
+SETTINGS_AREAS = (
+    (0x93000, 0x94000, "stock settings, first sector (the factory data)"),
+    (0x94000, 0x97000, "stock settings store"),
+    (0x97000, 0xE0000, "Felucca-family main store (songs, sounds, settings)"),
+    (0xE0000, 0xE5000, "Felucca-family staged update loader"),
+    (0xE5000, 0xE9000, "stock settings store"),
+    (GLOBALS_START, GLOBALS_END, "Felucca-family globals / superblock"),
+)
 
 EXPECTED_CHIP_KEY = 0x980F
 EXPECTED_FLASH_ID = 0x856014   # 1 MiB SPI NOR, as reported by the FM-1
@@ -515,7 +546,7 @@ def read_flash(dev: Fm1Device, addr: int, length: int, label="Reading") -> bytes
     if addr < 0 or length < 0 or addr + length > FLASH_SIZE:
         raise SafetyError("read 0x%X+0x%X is outside the flash" % (addr, length))
     out = bytearray()
-    prog = Progress(label, length)
+    prog = Progress(label, length) if label else None      # label None: no progress line
     try:
         while length > 0:
             n = min(length, dev.io_max)
@@ -525,9 +556,11 @@ def read_flash(dev: Fm1Device, addr: int, length: int, label="Reading") -> bytes
             out += data
             addr += n
             length -= n
-            prog.update(n)
+            if prog:
+                prog.update(n)
     finally:
-        prog.close()
+        if prog:
+            prog.close()
     return bytes(out)
 
 
@@ -540,6 +573,21 @@ def _check_mutable(addr: int, length: int):
                           "written (boot head)" % (addr, PROTECTED_END))
     if addr + length > FLASH_SIZE:
         raise SafetyError("0x%X+0x%X runs past the end of the flash" % (addr, length))
+    for start, end, what in NEVER_TOUCH:
+        if addr < end and addr + length > start:
+            raise SafetyError("refusing to touch 0x%X+0x%X: 0x%X..0x%X (%s) is never erased "
+                              "or written" % (addr, length, start, end - 1, what))
+
+
+def _check_repairable(addr: int, length: int):
+    """The gate of repair-settings: whole 4 KiB sectors inside the two settings windows."""
+    _check_mutable(addr, length)
+    if addr % SECTOR_SIZE or length % SECTOR_SIZE:
+        raise SafetyError("repair 0x%X+0x%X is not whole 4 KiB sectors; refusing" % (addr, length))
+    if not any(start <= addr and addr + length <= end for start, end in REPAIR_WINDOWS):
+        raise SafetyError("refusing to repair 0x%X+0x%X: only 0x%X..0x%X and 0x%X..0x%X are "
+                          "settings areas" % (addr, length, VM_START, VM_END - 1, GLOBALS_START,
+                                              GLOBALS_END - 1))
 
 
 def erase_range(dev: Fm1Device, addr: int, length: int):
@@ -761,6 +809,7 @@ def cmd_setup(args):
     if args.dry_run and not jl_dir.exists():
         log.info("DRY RUN: would run %s -m pip install -r %s", sys.executable,
                  jl_dir / "requirements.txt")
+        install_rtmidi(args)
         return EXIT_OK
     commit = verify_jlub(jl_dir)
     log.info("jl-uboot-tool OK: commit %s, wl82 loader sha256 %s", commit, WL82_LOADER_SHA256)
@@ -776,10 +825,28 @@ def cmd_setup(args):
         res = subprocess.run(pip)
         if res.returncode != 0:
             raise UnbrickError("pip install failed (exit %d)" % res.returncode)
+    install_rtmidi(args)
     if not platform_supported():
         log.info("Note: %s", MACOS_MESSAGE)
     log.info("Setup complete.")
     return EXIT_OK
+
+
+def install_rtmidi(args):
+    """python-rtmidi, for `softkey` only: a failure is a warning, not a failed setup."""
+    pip = [sys.executable, "-m", "pip", "install", "python-rtmidi"]
+    if args.no_pip:
+        log.info("Skipping pip (--no-pip) for python-rtmidi too (only `softkey` needs it)")
+    elif args.dry_run:
+        log.info("DRY RUN: would run %s", " ".join(pip))
+    else:
+        log.info("Installing python-rtmidi (for `softkey`): %s", " ".join(pip))
+        res = subprocess.run(pip)
+        if res.returncode != 0:
+            log.warning("WARNING: python-rtmidi could not be installed (exit %d). Everything "
+                        "but `softkey` works without it%s.", res.returncode,
+                        "; on Linux `softkey` uses raw ALSA instead"
+                        if sys.platform.startswith("linux") else "")
 
 
 def load_jlub(jl_dir: Path):
@@ -1297,6 +1364,643 @@ def cmd_restore(args, device=None):
 
 
 # --------------------------------------------------------------------------
+# repair-settings: the settings areas back to factory state
+# --------------------------------------------------------------------------
+#
+# Felucca-family firmwares keep their store at 0x97000..0xDFFFF and stage their
+# update loader at 0xE0000..0xE4FFF, inside stock V15's settings store (VM,
+# 0x93000..0xE8FFF), and their globals at 0xFC000..0xFEFFF. The installers only
+# rewrite 0x4000..0x92FFF, so after going back to stock V15 it reads those
+# leftovers as its own settings. The repair: the VM as in a factory dump (only
+# its sector 0x93000 holds data), 0xFC000..0xFEFFF erased, everything else as is.
+
+BLANK_SECTOR = b"\xff" * SECTOR_SIZE
+
+
+def load_factory_dump(path):
+    """Read and vet a clean factory dump; return its bytes."""
+    path = Path(path)
+    try:
+        data = path.read_bytes()
+    except OSError as e:
+        raise UnbrickError("cannot read the factory dump %s: %s" % (path, e))
+    problems = []
+    if len(data) != FLASH_SIZE:
+        problems.append("it is %d bytes, a full FM-1 dump is exactly %d (1 MiB)"
+                        % (len(data), FLASH_SIZE))
+    else:
+        if data[VM_START:VM_START + 4] != VM_MAGIC:
+            problems.append("its sector 0x%X does not start with %s (got %s)"
+                            % (VM_START, VM_MAGIC.hex(" ").upper(),
+                               data[VM_START:VM_START + 4].hex(" ").upper()))
+        for start, end in ((VM_START + SECTOR_SIZE, VM_END), (GLOBALS_START, GLOBALS_END)):
+            used = used_sectors(data, start, end)
+            if used:
+                problems.append("0x%X..0x%X is not erased (%d sectors hold data: %s)"
+                                % (start, end - 1, len(used), ranges_text(used)))
+    if problems:
+        raise UnbrickError("%s is not a clean factory dump: %s. It must be the backup of a "
+                           "factory-fresh FM-1; refusing." % (path.name, "; ".join(problems)))
+    log.info("Factory     %s", path)
+    log.info("  sha256                   %s", sha256(data))
+    log.info("  settings sector 0x%X sha256 %s", VM_START,
+             sha256(data[VM_START:VM_START + SECTOR_SIZE]))
+    log.info("  clean: 0x%X..0x%X and 0x%X..0x%X erased", VM_START + SECTOR_SIZE, VM_END - 1,
+             GLOBALS_START, GLOBALS_END - 1)
+    return data
+
+
+def used_sectors(data, start, end):
+    """Addresses of the 4 KiB sectors in [start, end) that are not all 0xFF."""
+    return [a for a in range(start, end, SECTOR_SIZE) if data[a:a + SECTOR_SIZE] != BLANK_SECTOR]
+
+
+def ranges_text(addrs):
+    """'0x93000..0x93FFF, 0x97000..0xDFFFF' for a sorted list of sector addresses."""
+    runs = []
+    for a in addrs:
+        if runs and runs[-1][1] == a:
+            runs[-1][1] = a + SECTOR_SIZE
+        else:
+            runs.append([a, a + SECTOR_SIZE])
+    return ", ".join("0x%05X..0x%05X" % (a, b - 1) for a, b in runs) or "none"
+
+
+def factory_settings_image(backup: bytes, factory: bytes) -> bytes:
+    """The backup with the VM taken from the factory dump and the globals erased."""
+    img = bytearray(backup)
+    img[VM_START:VM_END] = factory[VM_START:VM_END]
+    img[GLOBALS_START:GLOBALS_END] = b"\xff" * (GLOBALS_END - GLOBALS_START)
+    return bytes(img)
+
+
+def report_settings_areas(dump: bytes):
+    """What the two windows hold now, area by area, and the markers found there."""
+    lines = []
+    for start, end, what in SETTINGS_AREAS:
+        used = used_sectors(dump, start, end)
+        lines.append("    0x%05X..0x%05X %-52s %2d of %2d sectors in use%s"
+                     % (start, end - 1, what, len(used), (end - start) // SECTOR_SIZE,
+                        (": " + ranges_text(used)) if used and len(used) < 4 else ""))
+    for rx, what in MARKER_PATTERNS:
+        hits = [(m.start(), m.group(0).decode("ascii", "replace"))
+                for start, end in REPAIR_WINDOWS for m in rx.finditer(dump, start, end)]
+        if hits:
+            lines.append("    marker: %s %s" % (what, ", ".join("%r at 0x%05X" % (t, o)
+                                                            for o, t in hits[:4])))
+    return lines
+
+
+def erase_repair_sector(dev: Fm1Device, addr: int):
+    """One 4 KiB sector erase (never a block erase) inside the settings windows."""
+    _check_repairable(addr, SECTOR_SIZE)
+    dev.ldr.flash_erase_sector(addr)
+
+
+def write_repair_sector(dev: Fm1Device, addr: int, data: bytes):
+    """Program one erased 4 KiB sector of the settings windows in io_max chunks."""
+    _check_repairable(addr, len(data))
+    for off in range(0, len(data), dev.io_max):
+        chunk = data[off:off + dev.io_max]
+        _check_mutable(addr + off, len(chunk))
+        dev.ldr.flash_write(addr + off, chunk)
+
+
+def repair_sectors(dev: Fm1Device, expected: bytes, sectors):
+    """Erase, write (unless blank) and read back each sector; retry a sector once."""
+    prog = Progress("Repairing", len(sectors) * SECTOR_SIZE)
+    try:
+        for addr in sectors:
+            target = expected[addr:addr + SECTOR_SIZE]
+            for attempt in (1, 2):
+                erase_repair_sector(dev, addr)
+                if target != BLANK_SECTOR:
+                    write_repair_sector(dev, addr, target)
+                back = read_flash(dev, addr, SECTOR_SIZE, None)
+                if back == target:
+                    break
+                first = next(i for i in range(SECTOR_SIZE) if back[i] != target[i])
+                log.error("  sector 0x%05X: read-back MISMATCH, first at 0x%05X", addr,
+                          addr + first)
+                if attempt == 1:
+                    log.info("  Retrying sector 0x%05X once", addr)
+            else:
+                raise UnbrickError("sector 0x%05X still reads back wrong after two attempts"
+                                   % addr, EXIT_DANGER)
+            log.debug("sector 0x%05X %s and verified", addr,
+                      "erased" if target == BLANK_SECTOR else "erased, written")
+            prog.update(SECTOR_SIZE)
+    finally:
+        prog.close()
+
+
+REPAIR_DANGER_TEXT = """
+!!! The settings areas could not be verified. !!!
+  * Do not use the FM-1 before a successful repair-settings run.
+  * The firmware itself (0x0000-0x92FFF) was not touched, nor 0xE9000-0xFBFFF
+    (Bluetooth data, factory voices) and 0xFF000-0xFFFFF.
+  * Run the same repair-settings command again, if possible with another cable
+    or USB port. Your backup: %s
+"""
+
+REPAIR_DONE_TEXT = """
+Done. Now:
+  1. Unplug the USB cable.
+  2. Switch the FM-1 off.
+  3. Wait 5 seconds.
+  4. Switch it on: stock V15 starts with factory settings.
+  The preset banks can then be reloaded with stock's own System > Reset Patches.
+"""
+
+
+def cmd_repair_settings(args, device=None):
+    log.info("Step 1/7: factory dump")
+    factory = load_factory_dump(args.factory)
+    pkg = None
+    if args.package:
+        pkg = Package.load(args.package)
+        pkg.log_summary()
+
+    def run(dev):
+        log.info("Step 2/7: device")
+        check_identity(dev, args.i_know)
+        log.info("Step 3/7: backup (mandatory)")
+        backup_path, dump = take_backup(dev, Path("backups"), [pkg] if pkg else [])
+        if pkg and dump[FW_START:FW_END] != pkg.firmware:
+            log.warning("NOTE: the firmware region differs from %s (factory units carry a "
+                        "firmware image that differs from the public package); continuing.",
+                        pkg.path.name)
+        fw = dump[FW_START:FW_END]
+        if any(rx.search(fw) for rx, _ in MARKER_PATTERNS[:2]):
+            log.warning("NOTE: the firmware region holds Felucca-family markers: the unit "
+                        "may run a custom firmware, not stock. This repair is meant for a unit "
+                        "back on stock V15; it deletes that firmware's store too.")
+
+        log.info("Step 4/7: plan")
+        expected = factory_settings_image(dump, factory)
+        sectors = [a for a in range(0, FLASH_SIZE, SECTOR_SIZE)
+                   if dump[a:a + SECTOR_SIZE] != expected[a:a + SECTOR_SIZE]]
+        for a in sectors:                       # by construction; checked anyway
+            _check_repairable(a, SECTOR_SIZE)
+        written = [a for a in sectors if expected[a:a + SECTOR_SIZE] != BLANK_SECTOR]
+        log.info("  %d sectors differ from the factory state", len(sectors))
+
+        def result(ok, final_sha=None, error=None):
+            write_report(dev, "repair-result.json", dict(
+                dev.report, factory_dump=Path(args.factory).name,
+                factory_sha256=sha256(factory),
+                factory_settings_sector_sha256=sha256(factory[VM_START:VM_START + SECTOR_SIZE]),
+                sectors_changed=["0x%05x" % a for a in sectors],
+                sectors_written=["0x%05x" % a for a in written],
+                final_sha256=final_sha, ok=ok, error=error))
+
+        if not sectors:
+            log.info("The settings areas 0x%X..0x%X and 0x%X..0x%X are already factory-clean; "
+                     "nothing to write.", VM_START, VM_END - 1, GLOBALS_START, GLOBALS_END - 1)
+            result(True, sha256(dump))
+            return EXIT_OK
+
+        log.info("Step 5/7: confirmation")
+        confirm(args, [
+            "",
+            "About to REPAIR the FM-1 settings areas:",
+            "  device    %s (%s %s)%s" % (dev.path, dev.vendor, dev.product,
+                                          "  [MOCK]" if dev.mock else ""),
+            "  factory   %s (sha256 %s)" % (Path(args.factory).name, sha256(factory)[:16]),
+            "  erase     %d sectors of 4 KiB: %s" % (len(sectors), ranges_text(sectors)),
+            "  write     the factory settings into %s" % ranges_text(written),
+            "  in use on the unit now:",
+        ] + report_settings_areas(dump) + [
+            "  DELETED:  songs, sounds and settings that stock V15 or a custom firmware",
+            "            (Felucca, ChoralRoot, ...) keeps in these areas. The backup keeps them:",
+            "            %s" % backup_path,
+            "  NOT touched: 0x0..0x92FFF (boot head, firmware), 0xE9000..0xFBFFF (Bluetooth "
+            "data, factory voices), 0xFF000..0xFFFFF",
+            "",
+        ], "REPAIR")
+
+        log.info("Step 6/7: erase + write + verify, sector by sector. Do not unplug anything now.")
+        try:
+            repair_sectors(dev, expected, sectors)
+            log.info("Final check: reading back the whole flash")
+            final = read_flash(dev, 0, FLASH_SIZE, "Final read")
+            log.info("  read-back sha256 %s", sha256(final))
+            if final != expected:
+                first = next(i for i in range(FLASH_SIZE) if final[i] != expected[i])
+                raise UnbrickError("the final read differs from the expected image, first at "
+                                   "0x%05X" % first, EXIT_DANGER)
+        except KeyboardInterrupt:
+            log.error("Interrupted during the repair.")
+            log.error(REPAIR_DANGER_TEXT % backup_path)
+            result(False, error="interrupted")
+            return EXIT_DANGER
+        except Exception as e:
+            log.error("Repair failed: %s", e)
+            log.error(REPAIR_DANGER_TEXT % backup_path)
+            result(False, error=str(e))
+            return EXIT_DANGER
+        result(True, sha256(final))
+        log.info("  equals the expected image byte for byte")
+        log.info("Step 7/7: settings areas repaired: %d sectors erased, %d written, verified.",
+                 len(sectors), len(written))
+        log.info(REPAIR_DONE_TEXT)
+        return EXIT_OK
+    return with_device(args, run, device)
+
+
+# --------------------------------------------------------------------------
+# softkey: the USB-MIDI key into ROM boot mode
+# --------------------------------------------------------------------------
+#
+# Stock V15 (and the Felucca family) jumps into the mask-ROM UBOOT when its
+# USB-MIDI port receives F0 22 24 35 7D F7. On USB that is the 8-byte transfer
+# 04 F0 22 24 07 35 7D F7, and stock compares whole transfers: the six bytes go
+# out as ONE SysEx message, in one send call. The unit leaves the bus once it
+# takes the key, so a later send may fail. Only a power cycle leaves UBOOT.
+
+SOFT_KEY = bytes([0xF0, 0x22, 0x24, 0x35, 0x7D, 0xF7])
+SOFT_KEY_SENDS = 3
+SOFT_KEY_GAP = 0.02            # seconds between the sends
+SOFT_KEY_WAIT = 15.0           # seconds to wait for the WL82 UBOOT1.00 disk
+# The identity query and its answer, after ChoralRoot's tools/fm1_install.py
+# (HS_QUERY, unpack7, parse_identity, handshake).
+HS_QUERY = bytes([0xF0, 0x00, 0x32, 0x45, 0x00, 0x00, 0x00, 0x40, 0x7F, 0xF7])
+HS_TIMEOUT = 1.0
+HS_TRIES = 3
+FM1_PORT_TAG = "fm-1"          # an FM-1's MIDI port names contain this (any case)
+
+
+def pack7(data: bytes) -> bytes:
+    """8-bit bytes into 7-bit SysEx data, low bits first (fm1_install.py pack7)."""
+    out, acc, nb = bytearray(), 0, 0
+    for b in data:
+        acc |= b << nb
+        nb += 8
+        while nb >= 7:
+            out.append(acc & 0x7F)
+            acc >>= 7
+            nb -= 7
+    if nb:
+        out.append(acc & 0x7F)
+    return bytes(out)
+
+
+def unpack7(data: bytes) -> bytes:
+    out, acc, nb = bytearray(), 0, 0
+    for b in data:
+        acc |= (b & 0x7F) << nb
+        nb += 7
+        while nb >= 8:
+            out.append(acc & 0xFF)
+            acc >>= 8
+            nb -= 8
+    return bytes(out)
+
+
+def parse_identity(pkt: bytes):
+    """The identity text of an answer to HS_QUERY ("FM-1_015"), or None."""
+    if len(pkt) < 2 or pkt[0] != 0xF0 or pkt[-1] != 0xF7:
+        return None
+    d = unpack7(pkt[1:-1])
+    if len(d) != 34 or d[:3] != b"\x00\x59\x11":
+        return None
+    return d[6:33].split(b"\0")[0].decode("latin-1")
+
+
+def identity_answer(text: str) -> bytes:
+    """What an FM-1 answers to HS_QUERY (for the mock)."""
+    body = b"\x00\x59\x11\x00\x00\x00" + text.encode("latin-1")[:26].ljust(27, b"\0") + b"\0"
+    return b"\xF0" + pack7(body) + b"\xF7"
+
+
+def describe_identity(text: str) -> str:
+    m = re.fullmatch(r"FM-1_(\d+)", text)
+    if not m:
+        return "not an FM-1 firmware identity"
+    if m.group(1).startswith("0"):
+        return "M-VAVE stock firmware V%d" % int(m.group(1))
+    if text == "FM-1_920":
+        return "ChoralRoot (Felucca family)"
+    return "Felucca-family firmware"
+
+
+class MidiBackend:
+    """The MIDI layer of softkey: port names, one open input/output pair, SysEx.
+
+    list_ports() -> (input names, output names); open(in_name, out_name);
+    send(msg) sends one whole message in one call; read(timeout) returns the
+    next SysEx (bytes) or None; drain() drops what came in; close().
+    """
+
+    name = "?"
+
+    def drain(self):
+        while self.read(0) is not None:
+            pass
+
+
+class RtMidiBackend(MidiBackend):
+    """python-rtmidi. The input is polled (no callback): fm1_install.py found that a
+    callback can deadlock the interpreter when a port closes on CoreMIDI."""
+
+    name = "python-rtmidi"
+
+    def __init__(self, rtmidi):
+        self.rt, self.inp, self.out = rtmidi, None, None
+
+    def list_ports(self):
+        names = []
+        for cls in (self.rt.MidiIn, self.rt.MidiOut):
+            p = cls()
+            try:
+                names.append(list(p.get_ports()))
+            finally:
+                p.delete()
+        return names[0], names[1]
+
+    def open(self, in_name, out_name):
+        if in_name is not None:
+            self.inp = self.rt.MidiIn()
+            self.inp.ignore_types(sysex=False, timing=True, active_sense=True)
+            self.inp.open_port(self.inp.get_ports().index(in_name))
+        self.out = self.rt.MidiOut()
+        self.out.open_port(self.out.get_ports().index(out_name))
+
+    def send(self, msg):
+        self.out.send_message(list(msg))
+
+    def read(self, timeout):
+        end = time.monotonic() + timeout
+        while self.inp is not None:
+            m = self.inp.get_message()             # (message, delta) or None
+            if m:
+                if m[0] and m[0][0] == 0xF0:
+                    return bytes(m[0])
+                continue                            # notes and the like: not for us
+            if time.monotonic() >= end:
+                break
+            time.sleep(0.005)
+        return None
+
+    def close(self):
+        for p in (self.inp, self.out):
+            if p is not None:
+                try:
+                    p.close_port()
+                    p.delete()
+                except Exception as e:        # the unit may have left the bus already
+                    log.debug("closing a MIDI port: %s", e)
+        self.inp = self.out = None
+
+
+class AlsaRawBackend(MidiBackend):
+    """Linux without python-rtmidi: the sound card's raw MIDI device /dev/snd/midiCxDy
+    (one device for both directions), named after /proc/asound/cards."""
+
+    name = "ALSA raw MIDI"
+
+    def __init__(self, proc="/proc/asound/cards", devdir="/dev/snd"):
+        self.proc, self.devdir, self.fd, self.buf = proc, Path(devdir), None, bytearray()
+        self.paths = {}
+
+    def list_ports(self):
+        cards = {}
+        try:
+            for line in Path(self.proc).read_text(errors="replace").splitlines():
+                m = re.match(r"\s*(\d+)\s+\[(.*?)\s*\]:\s*(.*)$", line)
+                if m:
+                    cards[int(m.group(1))] = "%s: %s" % (m.group(2), m.group(3).strip())
+        except OSError:
+            pass
+        self.paths = {}
+        for p in sorted(self.devdir.glob("midiC*D*")):
+            m = re.match(r"midiC(\d+)D(\d+)$", p.name)
+            if m:
+                c, d = int(m.group(1)), int(m.group(2))
+                self.paths["%s (hw:%d,%d)" % (cards.get(c, "card %d" % c), c, d)] = p
+        names = list(self.paths)
+        return names, names
+
+    def open(self, in_name, out_name):
+        self.fd = os.open(str(self.paths[out_name]), os.O_RDWR | os.O_NONBLOCK)
+
+    def send(self, msg):
+        if os.write(self.fd, bytes(msg)) != len(msg):
+            raise OSError("short write to the raw MIDI device")
+
+    def read(self, timeout):
+        import select
+        end = time.monotonic() + timeout
+        while True:
+            start = self.buf.find(b"\xF0")
+            stop = self.buf.find(b"\xF7", start + 1) if start >= 0 else -1
+            if stop >= 0:
+                pkt = bytes(b for b in self.buf[start:stop + 1] if b < 0xF8)   # drop real-time bytes
+                del self.buf[:stop + 1]
+                return pkt
+            left = end - time.monotonic()
+            if left < 0 or not select.select([self.fd], [], [], max(left, 0))[0]:
+                return None
+            try:
+                self.buf += os.read(self.fd, 4096)
+            except BlockingIOError:
+                pass
+
+    def close(self):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError as e:
+                log.debug("closing the raw MIDI device: %s", e)
+            self.fd = None
+
+
+class MockMidi(MidiBackend):
+    """A dry run's FM-1 on USB-MIDI: answers HS_QUERY with `identity` (None: no
+    answer), records every message sent, and leaves the bus once it has the key
+    (later sends fail, as on the unit)."""
+
+    name = "MOCK MIDI"
+
+    def __init__(self, ports=("FM-1",), identity=V15_IDENTITY):
+        self.ports, self.identity = list(ports), identity
+        self.sent, self.inbox, self.opened, self.closed, self.gone = [], [], None, False, False
+
+    def list_ports(self):
+        return list(self.ports), list(self.ports)
+
+    def open(self, in_name, out_name):
+        self.opened = (in_name, out_name)
+
+    def send(self, msg):
+        if self.gone:
+            raise OSError("the device left the bus")
+        self.sent.append(bytes(msg))
+        if bytes(msg) == HS_QUERY and self.identity is not None:
+            self.inbox.append(identity_answer(self.identity))
+        if bytes(msg) == SOFT_KEY:
+            self.gone = True
+
+    def read(self, timeout):
+        return self.inbox.pop(0) if self.inbox else None
+
+    def close(self):
+        self.closed = True
+
+
+def midi_backend(args) -> MidiBackend:
+    if args.dry_run:
+        log.info("DRY RUN: using a MOCK FM-1 on MIDI (no real MIDI port is opened)")
+        return MockMidi()
+    try:
+        import rtmidi
+        return RtMidiBackend(rtmidi)
+    except ImportError:
+        pass
+    if sys.platform.startswith("linux"):
+        log.info("python-rtmidi is not installed; using raw ALSA MIDI (/dev/snd/midiC*D*)")
+        return AlsaRawBackend()
+    raise UnbrickError("softkey needs python-rtmidi: run `%s -m pip install python-rtmidi` "
+                       "(or `python fm1_unbrick.py setup`) and try again"
+                       % Path(sys.executable).name)
+
+
+def select_midi_port(names, explicit, what):
+    """The one port named explicitly (exact, or the only one containing it), or the
+    one FM-1 port. Refuses none and several."""
+    if explicit:
+        found = [n for n in names if n == explicit] or [n for n in names if explicit in n]
+    else:
+        found = [n for n in names if FM1_PORT_TAG in n.lower()]
+    listing = "\n".join("  " + n for n in names) or "  (none)"
+    if not found:
+        raise UnbrickError("no MIDI %s port %s. Plug the FM-1 in with a data cable, switch it "
+                           "on and wait for its screen. MIDI %s ports here:\n%s"
+                           % (what, "matches %r" % explicit if explicit else "named FM-1",
+                              what, listing))
+    if len(found) > 1:
+        raise SafetyError("%d MIDI %s ports match; refusing to guess. Unplug the other FM-1s "
+                          "or pass --port with the exact name:\n%s"
+                          % (len(found), what, "\n".join("  " + n for n in found)))
+    return found[0]
+
+
+def midi_handshake(midi: MidiBackend, tries=HS_TRIES, timeout=HS_TIMEOUT):
+    """Ask the identity, up to `tries` times; its text or None (fm1_install.py handshake)."""
+    midi.drain()
+    for _ in range(tries):
+        try:
+            midi.send(HS_QUERY)
+        except Exception as e:
+            raise UnbrickError("could not send to the FM-1's MIDI port: %s" % e)
+        end = time.monotonic() + timeout
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            pkt = midi.read(left)
+            if pkt is None:
+                break
+            text = parse_identity(pkt)
+            if text is not None:
+                return text
+    return None
+
+
+def wait_for_uboot(timeout=SOFT_KEY_WAIT):
+    """Poll find_devices() until a WL82 UBOOT1.00 disk shows up or `timeout` passes."""
+    if sys.platform.startswith("linux") and not Path("/sys/class/scsi_generic").is_dir():
+        log.info("No /sys/class/scsi_generic: load the SCSI generic driver with `sudo modprobe "
+                 "sg`, then run `sudo python3 fm1_unbrick.py find`.")
+        return []
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            found = find_devices()
+        except UnbrickError as e:
+            log.debug("find: %s", e)
+            found = []
+        if found or time.monotonic() > deadline:
+            return found
+        time.sleep(1.0)
+
+
+def cmd_softkey(args, midi=None):
+    midi = midi or midi_backend(args)
+    log.info("MIDI        %s", midi.name)
+    try:
+        ins, outs = midi.list_ports()
+    except Exception as e:
+        raise UnbrickError("cannot list this computer's MIDI ports: %s" % e)
+    log.debug("MIDI inputs %r, outputs %r", ins, outs)
+    out_name = select_midi_port(outs, args.port, "output")
+    in_name = select_midi_port(ins, args.port, "input")
+    log.info("FM-1 port   out %r, in %r", out_name, in_name)
+    try:
+        midi.open(in_name, out_name)
+    except Exception as e:
+        raise UnbrickError("cannot open the FM-1's MIDI port (%s). Close other programs that "
+                           "use it (the M-VAVE app, a browser page, a DAW) and try again." % e)
+    try:
+        ident = midi_handshake(midi)
+        if ident is None:
+            if not args.i_know:
+                raise SafetyError("the FM-1 does not answer the identity query; refusing (is it "
+                                  "on its normal screen? --i-know sends the key anyway)")
+            log.warning("WARNING: no identity answer; sending the key because of --i-know")
+        else:
+            log.info("Identity    %s = %s", ident, describe_identity(ident))
+            if ident.lower().startswith("ota-"):
+                raise SafetyError("the FM-1 is in update mode (%s): finish or cancel the update "
+                                  "first (switch it off and on); refusing" % ident)
+            if not re.fullmatch(r"FM-1_\d+", ident):
+                raise SafetyError("%r is not an FM-1; refusing" % ident)
+        confirm(args, [
+            "",
+            "About to send the ROM boot key to the FM-1 on %r:" % out_name,
+            "  the FM-1 drops into its ROM boot mode (USB disk %s), the screen goes" % DEVICE_MODEL,
+            "  dark. Nothing is written to it. Switching it off and on brings it back.",
+            "",
+        ], "UBOOT")
+        for i in range(SOFT_KEY_SENDS):
+            if i:
+                time.sleep(SOFT_KEY_GAP)
+            try:
+                midi.send(SOFT_KEY)
+            except Exception as e:
+                if i == 0:
+                    raise UnbrickError("could not send the key: %s" % e)
+                log.debug("send %d of the key: %s (the unit has left the bus: expected)", i + 1, e)
+                break
+        log.info("Key sent    %s", SOFT_KEY.hex(" ").upper())
+    finally:
+        midi.close()
+
+    if args.dry_run:
+        log.info("DRY RUN: a real FM-1 would now be in ROM boot mode (%s); not waiting for it.",
+                 DEVICE_MODEL)
+        return EXIT_OK
+    if not platform_supported():
+        log.info("The FM-1 should now be in ROM boot mode (dark screen, USB disk %s). This Mac "
+                 "cannot continue (jl-uboot-tool has no macOS SCSI back end): move the cable to a "
+                 "Windows or Linux machine; the FM-1 stays in ROM boot mode while it is powered."
+                 % DEVICE_MODEL)
+        return EXIT_OK
+    log.info("Waiting up to %d s for the %s disk", SOFT_KEY_WAIT, DEVICE_MODEL)
+    found = wait_for_uboot()
+    for c in found:
+        log.info("Found       %s  %s", c["path"], c["description"])
+    if found:
+        log.info("The FM-1 is in ROM boot mode: run repair-settings or restore now (Windows: an "
+                 "administrator PowerShell; Linux: sudo).")
+        return EXIT_OK
+    log.error("No %s disk appeared within %d s. The FM-1 may still be in ROM boot mode (dark "
+              "screen): on Windows run `find` from an administrator PowerShell, on Linux with "
+              "sudo after `sudo modprobe sg`.", DEVICE_MODEL, SOFT_KEY_WAIT)
+    return EXIT_FAIL
+
+
+# --------------------------------------------------------------------------
 # Command line
 # --------------------------------------------------------------------------
 
@@ -1356,10 +2060,23 @@ def build_parser():
                    help="refuse unless the package is the verified official V15")
     p.add_argument("--force-write", action="store_true",
                    help="write even if the device already holds this exact firmware")
+
+    p = sub.add_parser("softkey", parents=[common],
+                       help="send a running FM-1 the USB-MIDI key into ROM boot mode (any OS)")
+    p.add_argument("--port", help="the FM-1's MIDI port name (default: the single one named FM-1)")
+    p.add_argument("--yes", action="store_true", help="skip the typed confirmation")
+
+    p = sub.add_parser("repair-settings", parents=[common],
+                       help="backup + settings areas 0x93000..0xE8FFF and 0xFC000..0xFEFFF "
+                            "back to factory state + verify")
+    p.add_argument("--factory", required=True, metavar="FACTORY_DUMP.bin",
+                   help="full 1 MiB backup of a factory-fresh FM-1")
+    p.add_argument("--package", help="also compare the unit's firmware with this .fwsc")
+    p.add_argument("--yes", action="store_true", help="skip the typed confirmation")
     return ap
 
 
-def main(argv=None, device=None):
+def main(argv=None, device=None, midi=None):
     global _session
     _session = None
     args = build_parser().parse_args(argv)
@@ -1378,6 +2095,10 @@ def main(argv=None, device=None):
             return cmd_extract(args)
         if args.command == "restore":
             return cmd_restore(args, device)
+        if args.command == "softkey":
+            return cmd_softkey(args, midi)
+        if args.command == "repair-settings":
+            return cmd_repair_settings(args, device)
         return EXIT_UNSUPPORTED
     except UnbrickError as e:
         log.error("ERROR: %s", e)
