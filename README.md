@@ -1,3 +1,5 @@
+Good easy to use guide: https://github.com/GoodPerson42/FM1-Unbricking-For-Dummies
+
 # MvaveFM1Unbricker
 
 Restore a soft-bricked **M-VAVE FM-1** over a plain USB cable, without extra hardware.
