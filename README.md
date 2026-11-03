@@ -4,11 +4,17 @@ Good easy to use guide: https://github.com/GoodPerson42/FM1-Unbricking-For-Dummi
 
 Newer FM-1's have different flash chips (0xB36014) that are locking users into firmwares they can't flash out of. 
 
-Use `python fm1_unbrick.py info` to confirm your flash chip info. 
+Use to confirm your flash chip info. 
+
+```sh
+python fm1_unbrick.py info
+```
 
 Too get your unit back from this: put it in ROM boot (hold OCT-, OCT+ and HOME for 5 s, power on + OCT-, might be different depending on the firmware), then run
 
-`python3 fm1_unbrick.py restore FM-1.fwsc --i-know`
+```sh
+python3 fm1_unbrick.py restore FM-1.fwsc --i-know
+```
 
 FM-1.fwsc should be in same folder, replace with name of official V15 or V16. A V15 backup FWSC can be found here: https://github.com/aroum/fm1-custom-fw/issues/1
 
