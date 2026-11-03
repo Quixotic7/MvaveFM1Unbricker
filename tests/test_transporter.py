@@ -158,7 +158,7 @@ class MockProtocolTests(Base):
     def test_wrong_flash_id_info(self):
         t, m = self.transporter(flash_id=0x856015)
         self.assertEqual(self.run_main(["info"], t), 1)
-        self.assertIn("flash id 856015 is not 856014", self.out.getvalue())
+        self.assertIn("flash id 856015 is not 856014 or B36014", self.out.getvalue())
 
 
 # --------------------------------------------------------------------------

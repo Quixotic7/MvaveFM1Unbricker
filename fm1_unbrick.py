@@ -22,7 +22,7 @@ Safety rules, enforced in code:
     0xE9000..0xFBFFF (Bluetooth data, factory voices) or 0xFF000..0xFFFFF;
   * "erase chip" is never used;
   * a verified double backup is taken before any write;
-  * the chip key (0x980F) and flash ID (0x856014) must match an FM-1.
+  * the chip key (0x980F) and flash ID (0x856014 or 0xB36014) must match an FM-1.
 
 Run `python fm1_unbrick.py --help` and see README.md.
 """
@@ -47,7 +47,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-TOOL_VERSION = "1.2.0"
+TOOL_VERSION = "1.2.1"
 
 # --------------------------------------------------------------------------
 # Flash layout of the FM-1 (1 MiB SPI NOR flash)
@@ -87,7 +87,9 @@ SETTINGS_AREAS = (
 )
 
 EXPECTED_CHIP_KEY = 0x980F
-EXPECTED_FLASH_ID = 0x856014   # 1 MiB SPI NOR, as reported by the FM-1
+EXPECTED_FLASH_ID = 0x856014   # 1 MiB SPI NOR, as reported by the FM-1 (Puya, units up to 2026)
+FLASH_IDS_OK = (EXPECTED_FLASH_ID, 0xB36014)   # 0xB36014: another maker's 1 MiB part, same type and capacity
+                                                # bytes, in units with the logo on the front (seen 2026-11-02)
 
 # RAM the previous firmware run left behind, readable from the ROM until the
 # loader starts. Melodee keeps its crash record (fm1_crash_t, "CRSH") here; its
@@ -1077,14 +1079,14 @@ def check_identity(dev: Fm1Device, i_know=False):
     ondev = dev.ldr.online_device()
     fid = ondev["id"]
     log.info("Chip key    0x%04X (expected 0x%04X)", key, EXPECTED_CHIP_KEY)
-    log.info("Flash ID    0x%06X (expected 0x%06X, 1 MiB), type 0x%02X", fid,
-             EXPECTED_FLASH_ID, ondev.get("type", 0))
+    log.info("Flash ID    0x%06X (expected %s, 1 MiB), type 0x%02X", fid,
+             " or ".join("0x%06X" % x for x in FLASH_IDS_OK), ondev.get("type", 0))
     log.info("USB buffer  %d bytes", dev.io_max)
     problems = []
     if key != EXPECTED_CHIP_KEY:
         problems.append("chip key 0x%04X is not 0x%04X" % (key, EXPECTED_CHIP_KEY))
-    if fid != EXPECTED_FLASH_ID:
-        problems.append("flash ID 0x%06X is not 0x%06X" % (fid, EXPECTED_FLASH_ID))
+    if fid not in FLASH_IDS_OK:
+        problems.append("flash ID 0x%06X is not %s" % (fid, " or ".join("0x%06X" % x for x in FLASH_IDS_OK)))
     if problems:
         if not i_know:
             raise SafetyError("this does not look like an FM-1: %s. Stopping; nothing was "

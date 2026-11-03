@@ -44,7 +44,8 @@ Damage to the boot head (`0x0000`-`0x3FFF`) is not covered by either route: noth
    the UFW entry list) and checks the official V15 hash `6edf3c37…58a8255686` of that region. A file that says it is V15 but has another hash is refused.
 2. **Device**: finds exactly one `WL82 UBOOT1.00` USB disk (it refuses if there are none or
    several), checks that it answers as `WL82`, uploads jl-uboot-tool's wl82 USB loader, and
-   requires chip key `0x980F` and flash ID `0x856014`. Just before the loader starts it also
+   requires chip key `0x980F` and flash ID `0x856014` or `0xB36014` (the 1 MiB chip of the
+   2026 units with the logo on the front). Just before the loader starts it also
    reads 512 bytes of RAM at `0x1C7C000` (where Melodee leaves its crash record) and saves
    them as `retained-ram.bin` in this run's folder (see step 3). This is read-only and
    optional: if the read fails the tool carries on.
@@ -105,7 +106,7 @@ python3 fm1_transporter_recover.py wizard --v15 FM-1.fwsc  # step-by-step: flash
 | `setup` | fetches jl-uboot-tool at the pinned commit, checks `wl82loader.bin`'s sha256, splices it into the prebuilt placeholder firmware (`transporter/`) and checks the result's sha256, installs pyserial if missing |
 | `wizard [--v15 FM-1.fwsc]` | the whole procedure as numbered steps with "press Enter when done" prompts: the checks, `flash-xiao`, the wiring, the FM-1 power-on, `dump` + analysis, the dry run, the typed `WRITE`, the write + verify, the power-cycle |
 | `flash-xiao FILE.uf2` | puts the XIAO RP2040 into its `RPI-RP2` boot disk (the 1200-baud touch, or hold BOOT yourself), copies the Transporter firmware, waits for it to come back |
-| `status` / `info` | waits for the Transporter's data port and for the FM-1 to answer the USB_KEY; `info` requires chip key `0x980F` and flash ID `0x856014` |
+| `status` / `info` | waits for the Transporter's data port and for the FM-1 to answer the USB_KEY; `info` requires chip key `0x980F` and flash ID `0x856014` or `0xB36014` |
 | `rekey` | reboots the Transporter into USB_KEY mode (then switch the FM-1 off and on) |
 | `dump DIR [--v15 FM-1.fwsc] [--package X.fwsc ...]` | reads the whole 1 MiB twice, compares, saves one dump, and prints the analysis (head, app sectors per package, torn sectors, the staged loader, the update records, the data objects) |
 | `analyse DUMP.bin [--v15 ...] [--package ...]` | the same analysis offline, on a saved dump |
@@ -184,7 +185,7 @@ py fm1_unbrick.py extract FM-1.fwsc app_v15.bin --verify-v15     (or the guide's
 Get-CimInstance Win32_DiskDrive | Format-Table Index, Model, InterfaceType
 cd jl-uboot-tool
 py jluboottool.py --device '\\.\PhysicalDrive5'                  (your Index; Linux: /dev/sgN)
-    -> Quick info must show  Chip key: 0x980F  and  ID: 0x856014
+    -> Quick info must show  Chip key: 0x980F  and  ID: 0x856014 (or 0xB36014)
 =>JL: read 0 0x100000 backup.bin
 =>JL: read 0 0x100000 backup2.bin
 =>JL: exit

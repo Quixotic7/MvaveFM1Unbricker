@@ -19,7 +19,7 @@ Safety rules, enforced in code:
   * only whole 4 KiB sectors in 0x4000..0x92FFF are ever written; the boot
     head 0x0000..0x3FFF is compared and reported, never written;
   * no chip erase, no block erase (the Transporter has neither);
-  * the chip key (980F) and flash ID (856014) must match an FM-1 exactly,
+  * the chip key (980F) and flash ID (856014 or B36014) must match an FM-1 exactly,
     with no override;
   * a fresh full read must equal the reference dump over the whole package
     region 0x0000..0x92FFF, or nothing is written;
@@ -64,6 +64,7 @@ DATA_START = APP_END                  # device data (Felucca objects, loader, re
 EXPECTED_INFO = "OK key=980F type=3 id=856014"
 EXPECTED_KEY = "%04X" % fu.EXPECTED_CHIP_KEY
 EXPECTED_ID = "%06X" % fu.EXPECTED_FLASH_ID
+IDS_OK = tuple("%06X" % x for x in fu.FLASH_IDS_OK)
 
 # Staged update loader and update record (Felucca-family OTA)
 LOADER_HDR = 32
@@ -719,22 +720,22 @@ def ensure_uboot(t: Transporter, st: dict, timeout=20.0) -> dict:
 
 
 def check_info(t: Transporter) -> str:
-    """Chip key 980F, type 3, flash 856014, exactly; no override."""
+    """Chip key 980F, type 3, flash 856014 or B36014, exactly; no override."""
     reply = t.info()
     log.info("Info        %s", reply)
     fields = parse_info(reply)
     problems = []
     if fields.get("key") != EXPECTED_KEY:
         problems.append("chip key %s is not %s" % (fields.get("key"), EXPECTED_KEY))
-    if fields.get("id") != EXPECTED_ID:
-        problems.append("flash id %s is not %s" % (fields.get("id"), EXPECTED_ID))
-    if not problems and reply != EXPECTED_INFO:
+    if fields.get("id") not in IDS_OK:
+        problems.append("flash id %s is not %s" % (fields.get("id"), " or ".join(IDS_OK)))
+    if not problems and reply != EXPECTED_INFO.replace(EXPECTED_ID, fields["id"]):
         problems.append("reply is not %r" % EXPECTED_INFO)
     if problems:
         raise fu.SafetyError("this does not look like an FM-1: %s. Nothing was written."
                              % "; ".join(problems))
     log.info("Chip key %s and flash %s (1 MiB): this is an FM-1 in UBOOT", EXPECTED_KEY,
-             EXPECTED_ID)
+             fields["id"])
     return reply
 
 
@@ -2177,7 +2178,7 @@ def build_parser():
     p = sp("flash-xiao", "flash the Transporter firmware (.uf2) onto the XIAO RP2040")
     p.add_argument("uf2")
     sp("status", "wait for the FM-1 and print the Transporter status")
-    sp("info", "check chip key 980F and flash id 856014")
+    sp("info", "check chip key 980F and flash id 856014 or B36014")
     sp("rekey", "reboot the Transporter into USB_KEY mode")
 
     def labels(p):
