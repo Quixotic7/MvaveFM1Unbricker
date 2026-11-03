@@ -7,7 +7,7 @@ Newer FM-1's have different flash chips (0xB36014) that are locking users into f
 Use to confirm your flash chip info. 
 
 ```sh
-python fm1_unbrick.py info
+python3 fm1_unbrick.py info
 ```
 
 Too get your unit back from this: put it in ROM boot (hold OCT-, OCT+ and HOME for 5 s, power on + OCT-, might be different depending on the firmware), then run
