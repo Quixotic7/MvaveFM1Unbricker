@@ -1,0 +1,618 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FM1 Unbricker</title>
+<meta name="description" content="Your M-VAVE FM-1 has a black screen? A plain-language, step-by-step guide to why FM-1s get bricked and how to bring yours back.">
+<meta name="theme-color" content="#faf7f2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#12151c" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='7' width='28' height='18' rx='5' fill='%23e8582c'/%3E%3Crect x='7' y='11' width='12' height='7' rx='1.5' fill='%230d1017'/%3E%3Cpath d='M8.5 15c1.5-3 3-3 4.5 0s3 3 4.5 0' stroke='%237ef0c1' stroke-width='1.6' fill='none'/%3E%3Ccircle cx='24' cy='14.5' r='2.5' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="#top">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="7" width="28" height="18" rx="5" fill="#e8582c"/><rect x="7" y="11" width="12" height="7" rx="1.5" fill="#0d1017"/><path d="M8.5 15c1.5-3 3-3 4.5 0s3 3 4.5 0" stroke="#7ef0c1" stroke-width="1.6" fill="none"/><circle cx="24" cy="14.5" r="2.5" fill="#fff"/></svg>
+      <span>FM1 Unbricker<small class="motto">Unbrick my FM-1</small></span>
+    </a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#why">Why it breaks</a>
+      <a href="#versions">V15 / V16</a>
+      <a href="#fix">Find my fix</a>
+      <a href="#guides">Guides</a>
+      <a href="#custom">Custom firmware</a>
+      <a href="#faq">Questions</a>
+    </nav>
+    <button class="theme-btn" id="themeBtn" type="button" aria-label="Switch light or dark mode">◐</button>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ───────────────────────── hero ───────────────────────── -->
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="eyebrow">Unbrick my FM-1</span>
+      <h1>Black screen? Your FM&#8209;1 is <em>almost certainly</em> fixable.</h1>
+      <p class="lead">
+        When an FM-1 goes dark after an update, it's scary, but it is very rarely broken for good.
+        Its chip has a <button class="term" data-term="rescue">rescue mode</button> that no update can
+        erase. This guide explains what happened in plain words, then walks you through bringing it back,
+        one step at a time. No programming knowledge needed.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#fix">Find my fix →</a>
+        <a class="btn btn-ghost" href="#why">What happened to it?</a>
+      </div>
+      <ul class="reassure">
+        <li>Free and open source</li>
+        <li>Backs up everything first</li>
+        <li>Checks every byte it writes</li>
+      </ul>
+    </div>
+    <div data-synth="hero" data-state="dark" aria-hidden="true"></div>
+  </div>
+</section>
+
+<!-- ───────────────────────── inside ───────────────────────── -->
+<section id="inside">
+  <div class="wrap">
+    <span class="eyebrow">Step back for a second</span>
+    <h2>What's inside your FM&#8209;1</h2>
+    <p class="lead">
+      Everything your FM-1 knows lives in a tiny memory chip, a bit like a notebook with four sections.
+      <strong>Tap each section</strong> to see what it holds.
+    </p>
+
+    <div class="card">
+      <div class="mem-bar" id="memBar" role="group" aria-label="The FM-1's memory, in four sections"></div>
+      <div class="mem-legend"><span>start of the memory</span><span>end (1 MB in total)</span></div>
+      <div class="mem-detail" id="memDetail" aria-live="polite"></div>
+
+      <div class="rom-box">
+        <div class="rom-chip" aria-hidden="true">ROM</div>
+        <div>
+          <strong>And one thing that is <em>not</em> in the notebook: the rescue mode.</strong>
+          It's built into the chip itself when the chip is made, in permanent memory called
+          <button class="term" data-term="rom">ROM</button>. Nothing can change it, not an update, not a bad
+          install, not this tool. When things go wrong, the rescue mode is still there, and that's how
+          every fix on this page gets in. On a computer it shows up as a USB drive called
+          <code class="inline">WL82 UBOOT1.00</code>.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── why ───────────────────────── -->
+<section id="why">
+  <div class="wrap">
+    <span class="eyebrow">How FM-1s get "bricked"</span>
+    <h2>Why it breaks, and how the fix works</h2>
+    <p class="lead">
+      "Bricked" just means the FM-1 won't start, so it's as useful as a brick. There are three common
+      ways it happens. Pick one and press play: each square is a small piece of the memory.
+    </p>
+
+    <div class="tabs" role="tablist" aria-label="Stories">
+      <button class="tab" role="tab" aria-selected="true" data-story="cut">The update got cut off</button>
+      <button class="tab" role="tab" aria-selected="false" data-story="head">The bootloader was replaced</button>
+      <button class="tab" role="tab" aria-selected="false" data-story="left">Leftovers after going back</button>
+    </div>
+
+    <div class="card sim">
+      <div class="synth-col"><div data-synth="sim" data-state="on" aria-hidden="true"></div></div>
+      <div>
+        <div class="sim-rows">
+          <div>
+            <div class="sim-row-label"><span style="color:var(--m-head)">■ Bootloader</span><small>tiny, but the FM-1 can't start without it</small></div>
+            <div class="cells head" id="cellsHead"></div>
+          </div>
+          <div>
+            <div class="sim-row-label"><span style="color:var(--m-fw)">■ Firmware</span><small id="fwLabel">the program</small></div>
+            <div class="cells fw" id="cellsFw"></div>
+          </div>
+          <div>
+            <div class="sim-row-label"><span style="color:var(--m-data)">■ Your stuff</span><small>settings, sounds, songs</small></div>
+            <div class="cells data" id="cellsData"></div>
+          </div>
+        </div>
+        <div class="sim-status">
+          <div class="say" id="simSay" aria-live="polite"></div>
+          <ul class="steps-live" id="simSteps"></ul>
+        </div>
+        <div class="sim-controls" id="simControls"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── versions ───────────────────────── -->
+<section id="versions">
+  <div class="wrap">
+    <span class="eyebrow">Which official firmware?</span>
+    <h2>V15, V16, and why it matters</h2>
+    <p class="lead">
+      M-VAVE now ships <strong>V16</strong> (October 2026) and no longer offers <strong>V15</strong> for download.
+      V16 is a big update, and it also arranges the memory differently. Most custom firmwares were built
+      on top of V15.
+    </p>
+
+    <div class="card">
+      <div class="seg" role="group" aria-label="Show the memory of" id="verPick">
+        <button type="button" data-ver="v15" aria-pressed="true">V15 layout</button>
+        <button type="button" data-ver="v16" aria-pressed="false">V16 layout</button>
+      </div>
+      <div class="mem-bar" id="verBar" role="group" aria-label="Memory layout"></div>
+      <div class="mem-legend"><span>start of the memory</span><span>end (1 MB)</span></div>
+      <div class="mem-detail" id="verDetail" aria-live="polite"></div>
+      <p><small>Switch between the two and watch the colours move: V16's firmware is longer, and it keeps its settings, sequences, Bluetooth data and presets in different places than V15. Positions are approximate.</small></p>
+    </div>
+
+    <div class="grid-3" style="margin-top:20px">
+      <div class="card">
+        <h3>To rescue a bricked FM&#8209;1: use V15</h3>
+        <p>It's the version the rescue tool can fully check, it works with every route on this page (the Transporter included), and it's the base most custom firmwares expect.</p>
+        <p><a class="btn btn-ghost btn-small" href="https://github.com/Quixotic7/FM1Backups/raw/main/V15-FM-1.fwsc">⬇ Download V15</a></p><p><small>From the <a href="https://github.com/Quixotic7/FM1Backups" target="_blank" rel="noopener">FM1Backups</a> repository (the <a href="https://thefirmwarehub.com/#official" target="_blank" rel="noopener">Firmware Hub</a> also keeps it). Wherever it comes from, the tool checks the file's <button class="term" data-term="fingerprint">fingerprint</button> and refuses anything that isn't the genuine V15.</small></p>
+      </div>
+      <div class="card">
+        <h3>Want V16? Install it once it works</h3>
+        <p>Once your FM-1 starts again, update to V16 with <a href="https://www.m-vave.com/download" target="_blank" rel="noopener">M-VAVE's own updater</a>, on a full battery. Or put V16 on directly with the <a href="#guides" data-goto="starter">Bootloader fix</a> (Windows or Linux), which writes all of it, its own bootloader included.</p>
+        <p><small>The normal USB fix and the Transporter refuse V16: they can only write as far as V15's firmware goes, and half a firmware would not start.</small></p>
+      </div>
+      <div class="card">
+        <h3>Custom firmware? Check its base</h3>
+        <p>Most custom firmwares were made to be installed over V15. Installing one over V16, or going back and forth, can leave <strong>presets, sounds or fonts garbled</strong>: each firmware finds the others' leftovers, or finds its own data overwritten. See <a href="#guides" data-goto="settings">Garbled presets, sounds or fonts</a>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── wizard ───────────────────────── -->
+<section id="fix">
+  <div class="wrap">
+    <div style="text-align:center">
+      <span class="eyebrow">Find my fix</span>
+      <h2>Answer a few questions, get your steps</h2>
+      <p class="lead" style="margin:0 auto 28px">Three or four questions. If you're not sure about an answer, there's always an "I'm not sure" option.</p>
+    </div>
+    <div class="card wizard" id="wizard" aria-live="polite"></div>
+  </div>
+</section>
+
+<!-- ───────────────────────── guides ───────────────────────── -->
+<section id="guides">
+  <div class="wrap narrow">
+    <span class="eyebrow">Step by step</span>
+    <h2>The guides</h2>
+    <p class="lead">Tick each step as you go: this page remembers where you were if you come back.</p>
+
+    <div class="guide-tabs">
+      <div class="tabs" role="tablist" aria-label="Guides">
+        <button class="tab" role="tab" aria-selected="true" data-guide="usb">USB fix</button>
+        <button class="tab" role="tab" aria-selected="false" data-guide="starter">Bootloader fix</button>
+        <button class="tab" role="tab" aria-selected="false" data-guide="transporter">Dark, no USB at all</button>
+        <button class="tab" role="tab" aria-selected="false" data-guide="settings">Garbled presets &amp; sounds</button>
+        <button class="tab" role="tab" aria-selected="false" data-guide="lock">New chip &amp; Firmware Lock</button>
+      </div>
+    </div>
+
+    <!-- ── USB fix ── -->
+    <article class="guide on" id="guide-usb" data-os="win">
+      <div class="guide-head">
+        <div>
+          <h3>USB fix: put the firmware back</h3>
+          <div class="meta"><span class="pill">About 15 minutes</span><span class="pill">No extra parts</span><span class="pill">Windows or Linux</span></div>
+        </div>
+        <div class="seg" role="group" aria-label="Your computer">
+          <button type="button" data-os-pick="win" aria-pressed="true">Windows</button>
+          <button type="button" data-os-pick="linux" aria-pressed="false">Linux / Raspberry Pi</button>
+        </div>
+      </div>
+      <p>For an FM-1 with a black screen that shows up on the computer as <code class="inline">WL82 UBOOT1.00</code>. This is the most common fix.</p>
+      <div class="progress-line"><div></div></div>
+      <ol class="steps">
+        <li>
+          <h4>Get these ready</h4>
+          <ul>
+            <li>The FM-1, <strong>charged</strong>.</li>
+            <li>A USB cable that carries <strong>data</strong>. Some cables only charge; if nothing shows up later, try another cable.</li>
+            <li class="os-only os-win">A Windows 10 or 11 computer.</li>
+            <li class="os-only os-linux">A Linux computer or a Raspberry Pi.</li>
+            <li>An internet connection (only for the setup).</li>
+          </ul>
+          <div class="callout tip"><span class="ico">i</span><p>Only have a Mac? This step can't run on macOS. Borrow any Windows PC, or use a Raspberry Pi. There's also a route that works on a Mac, with a small extra board: see <a href="#guides" data-goto="transporter">Dark, no USB at all</a>.</p></div>
+        </li>
+        <li class="os-only os-win">
+          <h4>Install Python (free)</h4>
+          <p>Python is the program that runs the rescue tool. Download it from <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org/downloads</a> and run the installer. On the first screen, tick <strong>"Add python.exe to PATH"</strong>, then click <strong>Install Now</strong>.</p>
+        </li>
+        <li class="os-only os-linux">
+          <h4>Check that Python is there</h4>
+          <p>Most Linux systems and Raspberry Pi OS already have it. Open a terminal and type:</p>
+          <div class="code"><pre>python3 --version</pre></div>
+          <p>Anything from <code class="inline">Python 3.9</code> up is fine.</p>
+        </li>
+        <li>
+          <h4>Download the rescue tool</h4>
+          <p><a class="btn btn-ghost btn-small" href="https://github.com/Quixotic7/MvaveFM1Unbricker/archive/refs/heads/main.zip">⬇ Download the tool (ZIP)</a></p>
+          <p class="os-only os-win">Open your Downloads folder, right-click <strong>MvaveFM1Unbricker-main.zip</strong>, choose <strong>Extract All…</strong>, then <strong>Extract</strong>. You now have a folder with a file called <code class="inline">fm1_unbrick.py</code> inside.</p>
+          <p class="os-only os-linux">Unzip it in your Downloads folder (double-click it, or <code class="inline">unzip MvaveFM1Unbricker-main.zip</code>). You now have a folder <code class="inline">MvaveFM1Unbricker-main</code> with <code class="inline">fm1_unbrick.py</code> inside.</p>
+        </li>
+        <li>
+          <h4>Get the official V15 firmware</h4>
+          <p>M-VAVE no longer offers V15, but a copy is kept here:</p>
+          <p><a class="btn btn-ghost btn-small" href="https://github.com/Quixotic7/FM1Backups/raw/main/V15-FM-1.fwsc">⬇ Download V15-FM-1.fwsc</a></p>
+          <p>Move it into the same folder as <code class="inline">fm1_unbrick.py</code>. Keep its name, <code class="inline">V15-FM-1.fwsc</code>: the commands below use it (if your browser saved it as <code class="inline">V15-FM-1 (1).fwsc</code>, rename it).</p>
+          <div class="callout tip"><span class="ico">i</span><p>The tool recognises the official <strong>V15</strong> file by its <button class="term" data-term="fingerprint">fingerprint</button> and refuses a damaged or fake one, so it doesn't matter where you got it.</p></div>
+          <div class="callout warn"><span class="ico">!</span><p><strong>Only have V16 from M-VAVE's site?</strong> This fix refuses it on purpose: V16's firmware is longer than what this fix writes. Use V15 here and update to V16 afterwards, or use the <a href="#guides" data-goto="starter">Bootloader fix</a>, which can write V16 completely. <a href="#versions">Why?</a></p></div>
+        </li>
+        <li>
+          <h4>Connect the FM&#8209;1</h4>
+          <p>Switch the FM-1 on (the screen stays black, that's expected) and plug it <strong>straight into the computer</strong>, not through a USB hub or dock.</p>
+          <div class="callout danger os-only os-win"><span class="ico">!</span><p><strong>If Windows asks to format a disk, click Cancel.</strong> That "disk" is the FM-1's rescue mode. Never format it.</p></div>
+        </li>
+        <li>
+          <h4 class="os-only os-win">Open PowerShell as administrator</h4>
+          <h4 class="os-only os-linux">Open a terminal</h4>
+          <p class="os-only os-win">Right-click the <strong>Start</strong> button and choose <strong>Terminal (Admin)</strong> or <strong>Windows PowerShell (Admin)</strong>. Click <strong>Yes</strong> when Windows asks. "Admin" matters: the tool needs it to talk to the FM-1.</p>
+          <p class="os-only os-linux">Open the Terminal app. You'll type a few commands; the tool will ask for your password when it needs it.</p>
+          <p>Then go into the tool's folder. Copy this, paste it in the window and press <kbd>Enter</kbd>:</p>
+          <div class="code os-only os-win"><pre>cd "$HOME\Downloads\MvaveFM1Unbricker-main\MvaveFM1Unbricker-main"</pre></div>
+          <div class="code os-only os-linux"><pre>cd ~/Downloads/MvaveFM1Unbricker-main</pre></div>
+          <div class="callout tip"><span class="ico">i</span><p class="os-only os-win">"Cannot find path"? Your folder is somewhere else. Open the folder that contains <code class="inline">fm1_unbrick.py</code> in File Explorer, click its address bar, copy it, and type <code class="inline">cd "</code>, paste, <code class="inline">"</code>, <kbd>Enter</kbd>.</p><p class="os-only os-linux">"No such file or directory"? Type <code class="inline">cd </code> (with a space), drag the folder that contains <code class="inline">fm1_unbrick.py</code> into the terminal window, and press <kbd>Enter</kbd>.</p></div>
+        </li>
+        <li>
+          <h4>Set up the tool (once)</h4>
+          <p>This downloads the helper that talks to the FM-1's chip. It takes a minute.</p>
+          <div class="code os-only os-win"><pre>py fm1_unbrick.py setup</pre></div>
+          <div class="code os-only os-linux"><pre>python3 -m venv .venv
+.venv/bin/python fm1_unbrick.py setup</pre></div>
+        </li>
+        <li>
+          <h4>Run the fix</h4>
+          <div class="code os-only os-win"><pre>py fm1_unbrick.py restore V15-FM-1.fwsc</pre></div>
+          <div class="code os-only os-linux"><pre>sudo modprobe sg
+sudo .venv/bin/python fm1_unbrick.py restore V15-FM-1.fwsc</pre></div>
+          <p>The tool checks it's talking to an FM-1, then reads the whole memory <strong>twice</strong> and saves a backup in the <code class="inline">backups</code> folder. Then it shows what it's about to do and asks you to confirm:</p>
+          <div class="screen-sample"><span class="label">What you'll see (shortened)</span>Backup OK   backups/fm1-recovery-…/full-flash-before.bin
+About to WRITE the FM-1 flash:
+  package   V15-FM-1.fwsc
+  identity  FM-1_015 = official M-VAVE V15 (sha256 verified)
+<span class="warn">Type WRITE to continue (anything else cancels):</span></div>
+          <p>Type <kbd>WRITE</kbd> in capitals and press <kbd>Enter</kbd>. It writes, then reads everything back to check it. <strong>Don't unplug anything while it works.</strong></p>
+        </li>
+        <li>
+          <h4>Restart the FM&#8209;1</h4>
+          <p>When it says <strong>Done</strong>:</p>
+          <ol>
+            <li>Unplug the USB cable.</li>
+            <li>Switch the FM-1 off.</li>
+            <li>Wait 5 seconds.</li>
+            <li>Switch it on. 🎉</li>
+          </ol>
+          <p>Keep the <code class="inline">backups</code> folder. If you used a custom firmware (Felucca, ChoralRoot…), your songs and settings from before are in it.</p>
+          <div class="callout tip"><span class="ico">i</span><p>Still black after a fix that said <strong>Done</strong>? Then the firmware wasn't the problem: the <button class="term" data-term="starter">bootloader</button> probably is. Go to the <a href="#guides" data-goto="starter">Bootloader fix</a>.</p></div>
+        </li>
+      </ol>
+    </article>
+
+    <!-- ── Bootloader fix ── -->
+    <article class="guide" id="guide-starter" data-os="win">
+      <div class="guide-head">
+        <div>
+          <h3>Bootloader fix: put everything back, bootloader included</h3>
+          <div class="meta"><span class="pill">About 15 minutes</span><span class="pill">No extra parts</span><span class="pill">Windows or Linux</span></div>
+        </div>
+        <div class="seg" role="group" aria-label="Your computer">
+          <button type="button" data-os-pick="win" aria-pressed="true">Windows</button>
+          <button type="button" data-os-pick="linux" aria-pressed="false">Linux / Raspberry Pi</button>
+        </div>
+      </div>
+      <p>For an FM-1 whose <button class="term" data-term="starter">bootloader</button> (the "boot head") was replaced or damaged, for example after installing a different bootloader with M-Flasher, that now won't start. It must still show up as <code class="inline">WL82 UBOOT1.00</code>.</p>
+      <p>It's also the way to put <strong>V16</strong> on directly: it writes the whole firmware from the file, with that version's own bootloader.</p>
+      <div class="callout warn"><span class="ico">!</span><p>This is the newest part of the tool (November 2026). It has been tested on simulated hardware and real memory dumps. Take the "look first" step below, and keep the backup it makes.</p></div>
+      <div class="progress-line"><div></div></div>
+      <ol class="steps">
+        <li>
+          <h4>Do steps 1 to 7 of the USB fix first</h4>
+          <p>Same preparation: Python, the tool, the firmware file <code class="inline">V15-FM-1.fwsc</code>, the FM-1 plugged in, the terminal open in the tool's folder, and <code class="inline">setup</code> done. <a href="#guides" data-goto="usb">Open the USB fix</a>.</p>
+        </li>
+        <li>
+          <h4>Look first (changes nothing)</h4>
+          <p>This makes a backup and shows what would change, then stops:</p>
+          <div class="code os-only os-win"><pre>py fm1_unbrick.py full-restore V15-FM-1.fwsc --plan-only</pre></div>
+          <div class="code os-only os-linux"><pre>sudo .venv/bin/python fm1_unbrick.py full-restore V15-FM-1.fwsc --plan-only</pre></div>
+          <p>Look for the line about the bootloader ("boot head on the unit now"). If it says it's <em>not</em> the stock one, this fix is for you.</p>
+        </li>
+        <li>
+          <h4>Run the full fix</h4>
+          <div class="code os-only os-win"><pre>py fm1_unbrick.py full-restore V15-FM-1.fwsc</pre></div>
+          <div class="code os-only os-linux"><pre>sudo .venv/bin/python fm1_unbrick.py full-restore V15-FM-1.fwsc</pre></div>
+          <p>It puts back the stock bootloader and the stock firmware. Your settings and sounds stay as they are. Type <kbd>FULL</kbd> when asked. It writes the bootloader <strong>last</strong> and checks every byte.</p>
+          <p><small>Using V16 instead? <a href="https://github.com/Quixotic7/FM1Backups/raw/main/V16-FM-1.fwsc">Download V16-FM-1.fwsc</a> (or get it from <a href="https://www.m-vave.com/download" target="_blank" rel="noopener">M-VAVE</a>), put it in the folder and use its name in place of <code class="inline">V15-FM-1.fwsc</code>. The tool recognises the genuine V16 and its bootloader by their fingerprints too.</small></p>
+          <div class="callout danger"><span class="ico">!</span><p>Keep the FM-1 plugged in until it says Done. If it's interrupted while writing the bootloader, the FM-1 won't start until you run the same command again.</p></div>
+        </li>
+        <li>
+          <h4>Restart the FM&#8209;1</h4>
+          <p>Unplug, switch off, wait 5 seconds, switch on.</p>
+        </li>
+        <li>
+          <h4>Got a full backup? You can use it instead</h4>
+          <p>If you have a full 1 MB backup of your FM-1 from before the problem (M-Flasher and this tool both make one), the fix can put back <em>everything</em> from it, factory sounds included:</p>
+          <div class="code os-only os-win"><pre>py fm1_unbrick.py full-restore --image my-backup.bin</pre></div>
+          <div class="code os-only os-linux"><pre>sudo .venv/bin/python fm1_unbrick.py full-restore --image my-backup.bin</pre></div>
+          <p>Replace <code class="inline">my-backup.bin</code> with your file's name. Your FM-1's own Bluetooth identity is kept unless you add <code class="inline">--include-unit-data</code> (only do that with a backup of this same FM-1).</p>
+          <p><small>If the tool says the bootloader in your file "is not the stock V15 or V16 bootloader" and you know it's the right one (for example m-bootloader, from your own backup), add <code class="inline">--other-head</code>.</small></p>
+        </li>
+      </ol>
+    </article>
+
+    <!-- ── Transporter ── -->
+    <article class="guide" id="guide-transporter" data-os="mac">
+      <div class="guide-head">
+        <div>
+          <h3>Dark, no USB at all: the Transporter</h3>
+          <div class="meta"><span class="pill">About an hour</span><span class="pill">2 small parts, about $15</span><span class="pill">Mac, Windows or Linux</span></div>
+        </div>
+        <div class="seg" role="group" aria-label="Your computer">
+          <button type="button" data-os-pick="mac" aria-pressed="true">Mac / Linux</button>
+          <button type="button" data-os-pick="win" aria-pressed="false">Windows</button>
+        </div>
+      </div>
+      <p>For an FM-1 that shows <strong>nothing</strong> on the computer, in any mode, with any cable. A tiny board (the <a href="https://github.com/kurogedelic/FM-1-transporter" target="_blank" rel="noopener">FM-1 Transporter</a>, by Leo Kuroshita) knocks on the chip's rescue mode from the outside. No soldering. This route also works if you only have a Mac.</p>
+      <div class="callout tip"><span class="ico">i</span><p>The Transporter puts the firmware back. It can't rewrite the <button class="term" data-term="starter">bootloader</button>: if that's your problem, see the <a href="#guides" data-goto="starter">Bootloader fix</a>.</p></div>
+      <div class="progress-line"><div></div></div>
+      <ol class="steps">
+        <li>
+          <h4>Buy the two parts</h4>
+          <ul>
+            <li><strong>Seeed Studio XIAO RP2040</strong>, with pins already soldered. It must be the <strong>RP2040</strong>, not the RP2350.</li>
+            <li>A <strong>USB-C to 4-pin "Dupont" pigtail</strong>: a USB-C plug with four loose wires (red, white, green, black).</li>
+            <li>A normal USB-C data cable for the board.</li>
+          </ul>
+          <p><small>Prefer photos of every step? <a href="https://github.com/GoodPerson42/FM1-Unbricking-For-Dummies" target="_blank" rel="noopener">Unbrick the FM1 for Dummies</a> walks through this same route on Windows, with the similar <strong>RP2040-Zero</strong> board (its pins <code class="inline">0</code> and <code class="inline">1</code> take the place of D6 and D7).</small></p>
+          <p>Charge the FM-1 fully: it runs on its battery during all of this.</p>
+        </li>
+        <li>
+          <h4>Get Python, the tool and the firmware</h4>
+          <p class="os-only os-mac">On a Mac, Python 3 comes with Apple's command line tools: open Terminal and type <code class="inline">python3 --version</code>; if it offers to install the tools, accept. Or get it from <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org</a>.</p>
+          <p class="os-only os-win">Install Python from <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org/downloads</a> (tick "Add python.exe to PATH").</p>
+          <p><a class="btn btn-ghost btn-small" href="https://github.com/Quixotic7/MvaveFM1Unbricker/archive/refs/heads/main.zip">⬇ Download the tool (ZIP)</a> and unzip it. Put the official <strong>V15</strong> firmware in the same folder: <a href="https://github.com/Quixotic7/FM1Backups/raw/main/V15-FM-1.fwsc">download V15-FM-1.fwsc</a>. The wizard finds it by itself.</p>
+          <p><small>It has to be V15: the Transporter can't write as far as V16's firmware goes. Update to V16 afterwards if you like.</small></p>
+        </li>
+        <li>
+          <h4>Set up (once)</h4>
+          <p>Open a terminal in the tool's folder (as in the USB fix) and run:</p>
+          <div class="code os-only os-mac"><pre>python3 fm1_transporter_recover.py setup</pre></div>
+          <div class="code os-only os-win"><pre>py fm1_transporter_recover.py setup</pre></div>
+          <p>It prepares the board's software and installs what it needs. No compiling.</p>
+        </li>
+        <li>
+          <h4>Start the wizard and follow it</h4>
+          <div class="code os-only os-mac"><pre>python3 fm1_transporter_recover.py wizard</pre></div>
+          <div class="code os-only os-win"><pre>py fm1_transporter_recover.py wizard</pre></div>
+          <p>The wizard tells you when to plug in the board, how to wire it and when to switch the FM-1 on. <strong>Switch the FM-1 on only when it says so.</strong> The wiring is three wires:</p>
+          <svg class="wiring" viewBox="0 0 640 230" role="img" aria-label="Wiring: XIAO pin D6 to the green wire (D+), pin D7 to the white wire (D-), GND to the black wire. The red wire is taped off and not connected.">
+            <rect x="20" y="40" width="190" height="150" rx="14" fill="var(--surface-2)" stroke="var(--line)"/>
+            <text x="115" y="30" text-anchor="middle">XIAO RP2040</text>
+            <rect x="70" y="170" width="90" height="26" rx="6" fill="var(--line)"/>
+            <text x="115" y="215" text-anchor="middle" class="sub">its USB-C goes to the computer</text>
+            <g>
+              <circle cx="200" cy="70" r="7" fill="#d4b26a"/><text x="186" y="74" text-anchor="end">D6</text>
+              <circle cx="200" cy="100" r="7" fill="#d4b26a"/><text x="186" y="104" text-anchor="end">D7</text>
+              <circle cx="200" cy="130" r="7" fill="#d4b26a"/><text x="186" y="134" text-anchor="end">GND</text>
+            </g>
+            <path d="M207 70 C300 70 330 70 430 70" stroke="#2fb35b" stroke-width="5" fill="none" stroke-linecap="round"/>
+            <path d="M207 100 C300 100 330 100 430 100" stroke="#cfd5de" stroke-width="5" fill="none" stroke-linecap="round"/>
+            <path d="M207 130 C300 130 330 130 430 130" stroke="#22262f" stroke-width="5" fill="none" stroke-linecap="round"/>
+            <path d="M430 160 L470 160" stroke="#e04848" stroke-width="5" fill="none" stroke-linecap="round"/>
+            <rect x="380" y="150" width="34" height="20" rx="3" fill="var(--warn)" opacity=".8"/>
+            <text x="340" y="190" text-anchor="middle" class="sub">red: tape it off, not connected</text>
+            <text x="300" y="62" text-anchor="middle" class="sub">green = D+</text>
+            <text x="300" y="92" text-anchor="middle" class="sub">white = D−</text>
+            <text x="300" y="122" text-anchor="middle" class="sub">black = GND</text>
+            <rect x="470" y="55" width="150" height="120" rx="14" fill="var(--surface)" stroke="var(--line)"/>
+            <rect x="430" y="60" width="44" height="110" rx="8" fill="var(--surface-2)" stroke="var(--line)"/>
+            <text x="545" y="105" text-anchor="middle">USB-C plug</text>
+            <text x="545" y="124" text-anchor="middle" class="sub">into the FM-1</text>
+          </svg>
+          <p><small>D6 and D7 are the two pins farthest from the board's USB-C connector, one on each side. Swapping the green and white wires damages nothing: the FM-1 just isn't found, so swap them and try again.</small></p>
+        </li>
+        <li>
+          <h4>Confirm and let it work</h4>
+          <p>The wizard reads the whole memory twice and saves it, shows what it will change, and asks you to type <kbd>WRITE</kbd>. Then it rewrites only the damaged parts and checks every byte.</p>
+        </li>
+        <li>
+          <h4>Restart the FM&#8209;1</h4>
+          <p>Switch the FM-1 off, remove the three wires, switch it on. It starts the official firmware. You can then install any other firmware the normal way, <strong>on a full battery</strong>.</p>
+        </li>
+      </ol>
+    </article>
+
+    <!-- ── Settings ── -->
+    <article class="guide" id="guide-settings" data-os="win">
+      <div class="guide-head">
+        <div>
+          <h3>Garbled presets, sounds or fonts</h3>
+          <div class="meta"><span class="pill">Try step 1 first: 1 minute</span><span class="pill">Steps 2 and 3 need a backup</span></div>
+        </div>
+      </div>
+      <p>Your FM-1 starts, but preset names are garbage, sounds are wrong or out of tune, or the text on screen looks broken. It's not a brick. It usually happens after going from a custom firmware, or from V16, back to V15 (or the other way round). There are two causes:</p>
+      <ul>
+        <li><strong>Leftovers.</strong> The previous firmware left its own data in the settings area, and the new one reads it as its own settings.</li>
+        <li><strong>Overwritten factory data.</strong> Some firmwares, and V16 itself, rewrite the area that holds the factory presets, sounds and fonts. Installing a firmware never puts that area back: only a backup can.</li>
+      </ul>
+      <div class="progress-line"><div></div></div>
+      <ol class="steps">
+        <li>
+          <h4>Use the FM&#8209;1's own reset</h4>
+          <p>On the FM-1, open <strong>System → Reset Patches</strong>. For many people that's all it takes.</p>
+        </li>
+        <li>
+          <h4>Have a backup from before? Put everything back</h4>
+          <p>The cleanest fix: if you (or M-Flasher, or this tool) made a full backup of this FM-1 while it was fine, restore it. That brings back the firmware it had then, its presets, sounds, fonts and settings, exactly. It's the <a href="#guides" data-goto="starter">Bootloader fix</a> with your backup file:</p>
+          <div class="code"><pre>py fm1_unbrick.py full-restore --image my-backup.bin --include-unit-data</pre></div>
+          <p><small>Windows, in an administrator terminal; on Linux use <code class="inline">sudo .venv/bin/python</code> instead of <code class="inline">py</code>. Only use <code class="inline">--include-unit-data</code> with a backup of <em>this</em> FM-1.</small></p>
+        </li>
+        <li>
+          <h4>No backup of your own? Use a factory one</h4>
+          <p>There's a <a href="https://github.com/Quixotic7/FM1Backups/raw/main/new-unit-factory-20261017/fm1-transporter-dump-20261017-001153.bin">full backup of a brand-new FM-1</a>, read before anything was ever installed on it. Restoring it puts your FM-1 back the way it left the factory: its firmware, factory presets, sounds and fonts, and clean settings. Your own Bluetooth identity is kept.</p>
+          <div class="code"><pre>py fm1_unbrick.py full-restore --image fm1-transporter-dump-20261017-001153.bin</pre></div>
+          <p><small>It erases what's on the FM-1 now (songs, your own presets): the tool backs everything up first. This backup comes from an FM-1 with the older memory chip (see <a href="#guides" data-goto="lock">New chip &amp; Firmware Lock</a>).</small></p>
+        </li>
+        <li>
+          <h4>Settings leftovers only? Reset the settings area</h4>
+          <p>If presets are scrambled on V15 but sounds and fonts are fine, the tool can put just the settings area back to factory state. It needs a backup of a factory-fresh FM-1: use <a href="https://github.com/Quixotic7/FM1Backups/raw/main/new-unit-factory-20261017/fm1-factory-settings-only.bin">this factory settings file</a> (from a new FM-1, read before anything was installed on it), and a Windows or Linux computer.</p>
+          <p>With the FM-1 on its normal screen, this switches it into rescue mode (works on a Mac too):</p>
+          <div class="code"><pre>py fm1_unbrick.py softkey</pre></div>
+          <p>Then, in an administrator terminal (see the USB fix):</p>
+          <div class="code"><pre>py fm1_unbrick.py repair-settings --factory fm1-factory-settings-only.bin</pre></div>
+          <p>Type <kbd>REPAIR</kbd> when asked. It only touches the settings areas, and your backup keeps everything it removes. Then unplug, switch off, wait 5 seconds, switch on, and do <strong>System → Reset Patches</strong> once more.</p>
+          <p><small>On a Mac, run the first command as <code class="inline">python3 fm1_unbrick.py softkey</code> (after <code class="inline">python3 fm1_unbrick.py setup</code>), then move the cable to the Windows or Linux computer: the FM-1 stays in rescue mode while it's on. On Linux, use <code class="inline">sudo .venv/bin/python</code> instead of <code class="inline">py</code>.</small></p>
+        </li>
+      </ol>
+    </article>
+    <!-- ── New chip / Firmware Lock ── -->
+    <article class="guide" id="guide-lock" data-os="win">
+      <div class="guide-head">
+        <div>
+          <h3>New memory chip &amp; Firmware Lock</h3>
+          <div class="meta"><span class="pill">FM-1s sold from autumn 2026</span><span class="pill">About 20 minutes</span></div>
+        </div>
+      </div>
+      <p>FM-1s sold from autumn 2026 have a different memory chip than the first ones (a UCUN UC25HQ80, ID <code class="inline">0xB36014</code>, instead of a Puya, ID <code class="inline">0x856014</code>). Many firmwares written before it don't recognise it. Nothing is broken, but on a new FM-1 such a firmware can:</p>
+      <ul>
+        <li>lose your saves when you switch off, or show a <strong>save error</strong>;</li>
+        <li>refuse updates, so its installer can't replace it and you're stuck on it. People call this <strong>Firmware Lock</strong>.</li>
+      </ul>
+      <p>The rescue mode is in the chip itself and works the same on both, and this tool supports both chips. So a locked FM-1 can always be brought back.</p>
+      <div class="progress-line"><div></div></div>
+      <ol class="steps">
+        <li>
+          <h4>Which chip does yours have?</h4>
+          <p>Units sold from autumn 2026 usually have the new one; those are the units with the M-VAVE logo on the front. To be sure:</p>
+          <ul>
+            <li><a href="https://github.com/jvitkauskas/m-flasher" target="_blank" rel="noopener">M-Flasher</a> shows it under <strong>Device info</strong>: <code class="inline">0xB36014 (new)</code> or <code class="inline">0x856014 (old)</code>.</li>
+            <li>Or, with the FM-1 in rescue mode (step 2), this tool's <code class="inline">py fm1_unbrick.py info</code> prints <code class="inline">Flash ID</code>.</li>
+          </ul>
+        </li>
+        <li>
+          <h4>Stuck? Get into rescue mode</h4>
+          <p>The locked firmware won't let installers in, so go around it. Try these in order:</p>
+          <ul>
+            <li><strong>From the browser, nothing to install:</strong> on the <a href="https://thefirmwarehub.com/#rescue" target="_blank" rel="noopener">Firmware Hub's Rescue box</a>, in Chrome or Edge, use step 1, "Send the FM-1 to its bootloader".</li>
+            <li><strong>With this tool</strong> (any computer, Mac included), the FM-1 running and plugged in: <code class="inline">py fm1_unbrick.py softkey</code> (on a Mac or Linux: <code class="inline">python3 fm1_unbrick.py softkey</code>, after <code class="inline">setup</code>).</li>
+            <li><strong>With M-Flasher:</strong> its <strong>DOWNLOAD MODE</strong> button.</li>
+            <li><strong>From the keys:</strong> many Felucca-based firmwares (Felucca, SLOOP…) go there if you hold <kbd>OCT−</kbd> and <kbd>OCT+</kbd> for 5 seconds. Others have their own combination: check the firmware's page.</li>
+            <li><strong>Nothing works, or nothing shows up on USB:</strong> the <a href="#guides" data-goto="transporter">Transporter</a> always gets in.</li>
+          </ul>
+          <p>It worked if a drive called <code class="inline">WL82 UBOOT1.00</code> appears (Windows may offer to format it: <strong>Cancel</strong>; a Mac says it's unreadable: <strong>Ignore</strong>). The screen may stay as it was. That's normal.</p>
+        </li>
+        <li>
+          <h4>Put the official firmware back</h4>
+          <p>Now follow the <a href="#guides" data-goto="usb">USB fix</a> from its step 1, with <a href="https://github.com/Quixotic7/FM1Backups/raw/main/V15-FM-1.fwsc">V15</a>. It needs a Windows or Linux computer: on a Mac, move the cable over while the FM-1 stays on (it stays in rescue mode until switched off), or use the Transporter.</p>
+        </li>
+        <li>
+          <h4>Next time: check before you install</h4>
+          <ul>
+            <li>On a new-chip FM-1, only install firmware that supports it: the Firmware Hub has a <strong>"Saves on newer FM-1s"</strong> filter.</li>
+            <li><strong>Back up the whole memory first</strong> (M-Flasher's backup, or this tool's <code class="inline">backup</code> command in rescue mode). With a backup, nothing is ever lost.</li>
+          </ul>
+        </li>
+      </ol>
+    </article>
+
+
+    <p style="margin-top:28px"><small>Prefer reading it all in one place? The technical details are in the <a href="https://github.com/Quixotic7/MvaveFM1Unbricker#readme">README</a>. There's also a community guide, <a href="https://github.com/GoodPerson42/FM1-Unbricking-For-Dummies">FM1 Unbricking For Dummies</a>.</small></p>
+  </div>
+</section>
+
+<!-- ───────────────────────── custom firmware ───────────────────────── -->
+<section id="custom">
+  <div class="wrap">
+    <span class="eyebrow">Trying custom firmware</span>
+    <h2>180 firmwares, one FM&#8209;1: try them safely</h2>
+    <p class="lead">The <a href="https://thefirmwarehub.com/" target="_blank" rel="noopener">Firmware Hub</a> lists around 180 firmwares for the FM-1, made by different people. Each one can arrange the memory its own way, keep its data in different places, and support the new memory chip or not. Most were built to be installed over V15.</p>
+
+    <div class="card" style="margin-top:24px;border-color:color-mix(in srgb, var(--accent) 45%, var(--line))">
+      <span class="eyebrow">Try before you flash</span>
+      <h3>RemoteFM1: try firmwares without installing them</h3>
+      <p>The safest install is the one you don't do. <a href="https://remotefm1.com/" target="_blank" rel="noopener">RemoteFM1</a> is a firmware you put on your FM-1 <strong>once</strong>. After that, the firmwares themselves run on your computer, phone or tablet, and your FM-1 becomes their keyboard, knobs and screen. Switching firmware is a click, not a flash, so there's nothing to brick and nothing left behind in your FM-1's memory.</p>
+      <ul>
+        <li><strong>Install it once</strong> with its <a href="https://remotefm1.com/installer/" target="_blank" rel="noopener">web installer</a> (Chrome or Edge, USB). Back up first, as with any install.</li>
+        <li><strong>Pick a firmware</strong> at <a href="https://remotefm1.com/" target="_blank" rel="noopener">remotefm1.com</a> (about 160 of them) and choose <strong>Play on my FM-1</strong>. There are also apps for iPhone, iPad and Android, and a Mac plugin. The sound plays on that device.</li>
+        <li><strong>No FM-1 handy?</strong> Most firmwares also play right on the page, with your keyboard, mouse or a MIDI keyboard.</li>
+        <li><strong>On its own</strong>, RemoteFM1 is still an instrument: a DX7-style synth, a MIDI controller and a looper.</li>
+      </ul>
+      <p><small>Found one you love? Then install that firmware for real, using the habits below. M-VAVE's own firmware can't run this way; to go back to it, install V15 or V16 as usual.</small></p>
+    </div>
+
+    <p style="margin-top:28px">When you do install a firmware for real, a few habits make it safe:</p>
+    <div class="safe-grid" style="margin-top:12px">
+      <div class="card"><div class="num">💾</div><h3>Back up first, every time</h3><p>A full backup (M-Flasher, or this tool's <code class="inline">backup</code>) is the one thing that can put <em>everything</em> back: firmware, presets, sounds, fonts and songs.</p></div>
+      <div class="card"><div class="num">🧩</div><h3>Check new-chip support</h3><p>On an FM-1 from autumn 2026, pick firmware marked <strong>"Saves on newer FM-1s"</strong>, or you may lose saves or get <a href="#guides" data-goto="lock">locked in</a>.</p></div>
+      <div class="card"><div class="num">🔋</div><h3>Full battery, good cable</h3><p>Most bricks are installs that got cut off. Charge fully, plug straight into the computer, keep it awake, and don't touch anything until it says it's finished.</p></div>
+      <div class="card"><div class="num">↩️</div><h3>Know your way back</h3><p>From a working FM-1: the hub's <strong>"Back to official V15"</strong> button. From a stuck one: this site's <a href="#fix">fix finder</a>. To get your exact old setup back: your backup.</p></div>
+      <div class="card"><div class="num">🎛️</div><h3>Expect leftovers</h3><p>Switching between firmwares (or between V15 and V16) can leave presets, sounds or fonts garbled. That's fixable: see <a href="#guides" data-goto="settings">Garbled presets &amp; sounds</a>.</p></div>
+      <div class="card"><div class="num">📖</div><h3>Read its page</h3><p>Each firmware has its own way into its update mode, its own key combinations, and sometimes its own notes about going back. A minute of reading saves an evening.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── safety ───────────────────────── -->
+<section id="safety">
+  <div class="wrap">
+    <span class="eyebrow">Is it safe?</span>
+    <h2>What the tool does to protect your FM&#8209;1</h2>
+    <p class="lead">It was written to be careful first. Here's what happens before, during and after it changes anything.</p>
+    <div class="safe-grid">
+      <div class="card"><div class="num">🔍</div><h3>Checks it's an FM&#8209;1</h3><p>It reads the chip's ID and stops if it doesn't match an FM-1 exactly.</p></div>
+      <div class="card"><div class="num">💾</div><h3>Backs up everything, twice</h3><p>It reads the whole memory two times, compares the two, and saves a backup before writing anything. If the two reads differ, it stops: that means the cable is unreliable.</p></div>
+      <div class="card"><div class="num">🧾</div><h3>Checks the firmware file</h3><p>It recognises the official file by its fingerprint and refuses one that's damaged or isn't what it claims to be.</p></div>
+      <div class="card"><div class="num">✍️</div><h3>Asks before writing</h3><p>It shows exactly what it will change and waits for you to type a word like <kbd>WRITE</kbd>. Anything else cancels.</p></div>
+      <div class="card"><div class="num">🎯</div><h3>Touches only what's needed</h3><p>The normal fix never touches the bootloader or your settings. Every change goes through one safety check in the code.</p></div>
+      <div class="card"><div class="num">✅</div><h3>Checks every byte</h3><p>After writing, it reads everything back and compares. If something's off, it tries once more, then tells you clearly what to do.</p></div>
+    </div>
+    <div class="callout danger" style="margin-top:28px"><span class="ico">!</span><p><strong>The one golden rule:</strong> if the tool ever says <strong>"Do NOT power off"</strong>, leave the FM-1 switched on and plugged in, and run the same command again (another cable or USB port helps). The FM-1 stays in rescue mode as long as it's on.</p></div>
+  </div>
+</section>
+
+<!-- ───────────────────────── faq ───────────────────────── -->
+<section id="faq">
+  <div class="wrap narrow faq">
+    <span class="eyebrow">Questions</span>
+    <h2>Common questions</h2>
+    <details><summary>Do I need to know programming?</summary><div><p>No. You'll copy and paste a few commands, exactly as shown, and type one word to confirm. The tool does the rest and tells you what's happening.</p></div></details>
+    <details><summary>Could this make things worse?</summary><div><p>It's designed not to. It makes a full backup first, checks that it's an FM-1, checks the firmware file, and verifies everything it writes. The rescue mode itself can't be damaged by any of this, so you can always try again.</p></div></details>
+    <details><summary>Will I lose my songs and settings?</summary><div><p>The normal fix only rewrites the firmware, not your settings. And the backup it makes before writing holds everything, songs and sounds included. Keep the <code class="inline">backups</code> folder. (If you used Felucca or ChoralRoot, the official firmware may later overwrite the area where they kept projects: they're still in the backup.)</p></div></details>
+    <details><summary>Is this made by M-VAVE?</summary><div><p>No. It's an unofficial, free, open-source community project, built on the recovery steps people worked out on r/MVaveFM1. Use it at your own risk.</p></div></details>
+    <details><summary>Why doesn't the USB fix work on a Mac?</summary><div><p>The helper program that talks to the chip's rescue mode has no Mac version. Use any Windows PC or a Raspberry Pi, or use the Transporter route, which works on a Mac.</p></div></details>
+    <details><summary>Windows asked me to format a disk. What do I do?</summary><div><p>Click <strong>Cancel</strong>. That "disk" is the FM-1's rescue mode. Never format it.</p></div></details>
+    <details><summary>The tool says "the two backup reads DIFFER"</summary><div><p>Nothing was written. The USB connection isn't reliable: use another data cable, another USB port, and plug the FM-1 straight into the computer, not into a hub.</p></div></details>
+    <details><summary>The tool says the firmware is "already" there, but it's still black</summary><div><p>Then the firmware isn't the problem. The usual causes are the <button class="term" data-term="starter">bootloader</button> (see the <a href="#guides" data-goto="starter">Bootloader fix</a>) or leftovers from a custom firmware. Ask in the community and attach the folder from <code class="inline">backups</code>.</p></div></details>
+    <details><summary>Which firmware should I put on it?</summary><div><p>To rescue it: the official <strong>V15</strong> (<a href="https://github.com/Quixotic7/FM1Backups/raw/main/V15-FM-1.fwsc">download</a>). Once the FM-1 works again, install whatever you like the normal way (V16 from M-VAVE, or a custom firmware), on a <strong>full battery</strong>, with the computer kept awake.</p></div></details>
+    <details><summary>Why V15 and not V16?</summary><div><p>V16 is newer, but its firmware is longer and the memory is arranged differently. The normal USB fix and the Transporter can only write as far as V15's firmware goes, so they refuse V16 rather than write half of it. The <a href="#guides" data-goto="starter">Bootloader fix</a> can write V16 completely. And most custom firmwares expect V15 underneath. <a href="#versions">More on V15 and V16</a>.</p></div></details>
+    <details><summary>Where do I get V15 now that M-VAVE only offers V16?</summary><div><p>From the <a href="https://github.com/Quixotic7/FM1Backups" target="_blank" rel="noopener">FM1Backups</a> repository (<a href="https://github.com/Quixotic7/FM1Backups/raw/main/V15-FM-1.fwsc">direct download</a>) or the <a href="https://thefirmwarehub.com/#official" target="_blank" rel="noopener">Firmware Hub</a>. The tool checks its fingerprint, so a damaged or fake file is refused.</p></div></details>
+    <details><summary>Can I try custom firmwares without installing each one?</summary><div><p>Yes: install <a href="https://remotefm1.com/" target="_blank" rel="noopener">RemoteFM1</a> once, then run firmwares from <a href="https://remotefm1.com/" target="_blank" rel="noopener">remotefm1.com</a> or its apps with your FM-1 as the panel. Switching is a click. See <a href="#custom">Trying custom firmware</a>.</p></div></details>
+    <details><summary>My FM-1 is new and saves disappear, or I can't install anything else</summary><div><p>That's the new memory chip with a firmware that doesn't know it: see <a href="#guides" data-goto="lock">New chip &amp; Firmware Lock</a>.</p></div></details>
+    <details><summary>How do I avoid this next time?</summary><div><p>Most bricks come from an update that was cut off. Before updating: charge the FM-1 fully, use a good data cable straight into the computer, stop the computer from going to sleep, and don't touch anything until the update says it's finished.</p></div></details>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>FM1 Unbricker</strong> · <em>Unbrick my FM-1</em>. The guide for <a href="https://github.com/Quixotic7/MvaveFM1Unbricker">MvaveFM1Unbricker</a> (MIT licence). Unofficial: not affiliated with or endorsed by M-VAVE. At your own risk.</p>
+    <p>Thanks to u/acrawf1 for the original community guide, u/International-Soup24 for the first dump of a bricked FM-1, kagaimiq for <a href="https://github.com/kagaimiq/jl-uboot-tool">jl-uboot-tool</a>, and Leo Kuroshita for <a href="https://github.com/hugelton/Felucca">Felucca</a> and the <a href="https://github.com/kurogedelic/FM-1-transporter">FM-1 Transporter</a>.</p>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
