@@ -188,4 +188,6 @@ The boot head is outside the scope of this procedure. If you want to know whethe
 stock, read it (`read 0 0x4000 head.bin`) and compare it with the first `0x4000` bytes of the
 flash image in the official V15 package; `fm1_unbrick.py backup DIR --package FM-1.fwsc` does
 this comparison for you. In the thread, the author reported that his head was byte-identical to
-the V15 package's head. Do not write the boot head.
+the V15 package's head. Do not write the boot head by hand. If yours was replaced (for example
+by another bootloader that does not start), `fm1_unbrick.py full-restore FM-1.fwsc` puts the
+stock V15 head back with checks; see README, "full-restore".

@@ -1,4 +1,6 @@
-Good easy to use guide: https://github.com/GoodPerson42/FM1-Unbricking-For-Dummies
+**New to this? Start with the illustrated guide: <https://quixotic7.github.io/MvaveFM1Unbricker/>**
+(why FM-1s get bricked, a "find my fix" wizard, and step-by-step instructions in plain language).
+Another easy guide: https://github.com/GoodPerson42/FM1-Unbricking-For-Dummies
 
 # Recover from firmware lock
 
@@ -10,13 +12,19 @@ Use to confirm your flash chip info.
 python3 fm1_unbrick.py info
 ```
 
-Too get your unit back from this: put it in ROM boot (hold OCT-, OCT+ and HOME for 5 s, power on + OCT-, might be different depending on the firmware), then run
+Too get your unit back from this: put it in ROM boot (hold OCT-, OCT+ and HOME for 5 s, power on + OCT-, might be different depending on the firmware; or `python3 fm1_unbrick.py softkey`, or the Rescue box on https://thefirmwarehub.com/#rescue), then run
 
 ```sh
-python3 fm1_unbrick.py restore FM-1.fwsc --i-know
+python3 fm1_unbrick.py restore V15-FM-1.fwsc
 ```
 
-FM-1.fwsc should be in same folder, replace with name of official V15 or V16. A V15 backup FWSC can be found here: https://github.com/aroum/fm1-custom-fw/issues/1
+with the official V15 in the same folder: https://github.com/Quixotic7/FM1Backups (V15, V16, and a full dump of a
+factory-fresh unit on the older flash chip). Both flash chips are accepted since 1.2.1, so `--i-know` is not needed.
+
+**Use V15 for `restore`.** M-VAVE now only distributes V16, whose firmware runs to `0xA8FFF`, past the
+`0x4000..0x92FFF` that `restore` (and the Transporter) writes. `restore` refuses it rather than write half a firmware.
+To put V16 on directly, use `full-restore V16-FM-1.fwsc`: it writes all of V16's flash image, its own stock
+bootloader included ([full-restore](#full-restore-everything-boot-head-included)).
 
 # MvaveFM1Unbricker
 
@@ -51,7 +59,14 @@ This repository has the step-by-step procedure for it, the parts, the wiring and
 automates it: **[TRANSPORTER-GUIDE.md](TRANSPORTER-GUIDE.md)** and `fm1_transporter_recover.py`
 (it works on macOS, Linux and Windows: the Transporter is a serial port, no SCSI needed). That is
 how the author's own unit came back on 2026-10-09 after an interrupted update.
-Damage to the boot head (`0x0000`-`0x3FFF`) is not covered by either route: nothing here writes it.
+**Boot head replaced or damaged** (`0x0000`-`0x3FFF`, for example by a replacement bootloader
+installed with M-Flasher that does not start)? `restore` never writes the head, but
+[`full-restore`](#full-restore-everything-boot-head-included) does: from the official package
+(stock bootloader + firmware) or from a full backup. It needs the unit to show up as
+`WL82 UBOOT1.00`, and Windows or Linux. The Transporter route cannot write the head: its firmware
+refuses it.
+Have a full 1 MiB flash backup but no Windows or Linux machine? The Transporter route can restore its
+application region (`--image`, on macOS too); see the Transporter commands below.
 
 ## What it does
 
@@ -96,7 +111,8 @@ firmware.
 | `info` | uploads the loader, prints chip key and flash ID, checks them |
 | `backup DIR` | double-read full backup into `DIR`; `--package X.fwsc` also compares the dump with a package |
 | `extract PACKAGE.fwsc OUT.bin` | writes the firmware region to `OUT.bin` and prints the identity; `--verify-v15` fails unless it is official V15 |
-| `restore PACKAGE.fwsc` | everything above, then write and verify. `--yes` skips the typed confirmation; `--verify-v15` refuses anything but the verified official V15; `--force-write` writes even if the region already matches |
+| `restore PACKAGE.fwsc` | everything above, then write and verify. Refuses a package whose firmware runs past `0x92FFF` (official V16): use V15, or `full-restore` for V16. `--yes` skips the typed confirmation; `--verify-v15` refuses anything but the verified official V15; `--force-write` writes even if the region already matches |
+| `full-restore PACKAGE.fwsc` or `full-restore --image FULL.bin` | backup, then rewrites every 4 KiB sector that differs, **boot head included**, sector by sector with read-back, head last, then a final full read. Type `FULL` to confirm. See [full-restore](#full-restore-everything-boot-head-included) |
 | `softkey [--port NAME]` | for a unit that still runs: asks its identity over USB-MIDI, then sends the key `F0 22 24 35 7D F7` that drops stock V15 (and the Felucca family) into ROM boot mode (`WL82 UBOOT1.00`). Writes nothing; a power cycle brings it back. Type `UBOOT` to confirm. Works on macOS too (needs `python-rtmidi`, which `setup` installs; Linux falls back to raw ALSA) |
 | `repair-settings --factory DUMP.bin [--package X.fwsc]` | backup, then puts the settings areas `0x93000..0xE8FFF` and `0xFC000..0xFEFFF` back to factory state (the factory settings sector `0x93000` from `DUMP.bin`, the rest erased), sector by sector with read-back, then a final full read. Type `REPAIR` to confirm. See [Settings corrupted after going back to stock](#settings-corrupted-after-going-back-to-stock) |
 
@@ -130,6 +146,7 @@ python3 fm1_transporter_recover.py wizard --v15 FM-1.fwsc  # step-by-step: flash
 | `analyse DUMP.bin [--v15 ...] [--package ...]` | the same analysis offline, on a saved dump |
 | `restore PACKAGE.fwsc --ref DUMP.bin [--write] [--yes] [--verify-v15]` | dry run unless `--write`: re-reads the flash (it must equal the dump), writes only the differing 4 KiB sectors of `0x4000..0x92FFF`, each erased, written and read back by the Transporter, then a final full read must equal the expected image. Type `WRITE` to confirm |
 | `recover PACKAGE.fwsc [--out DIR]` | `info`, `dump`, the dry run, the confirmation, the write, the power-cycle instructions |
+| `restore` / `recover` `--image FULL.bin` | the same, with the application region taken from a full 1 MiB flash backup instead of a package. Only `0x4000..0x92FFF` is written; the backup's head and device data are not (the Transporter refuses them). Refused if the image is torn or blank, or if its head differs from the unit's and its application region is not V15. See [TRANSPORTER-GUIDE.md](TRANSPORTER-GUIDE.md#from-a-full-flash-backup-instead-of-a-package) |
 
 `--dry-run` drives an in-memory mock Transporter; `--mock-flash DUMP.bin` seeds it from a real
 dump, to rehearse the whole flow without hardware. Exit codes as above.
@@ -219,9 +236,12 @@ Then unplug, switch off, wait 5 s, switch on.
 
 ## Safety rules
 
-- **Nothing below `0x4000` is ever written or erased.** `0x0000`-`0x3FFF` is the boot head that
-  lets the chip recover at all. In the script every erase and write goes through a single gate
-  that refuses addresses below `0x4000`, unaligned erases, and anything past the end of the flash.
+- **Nothing below `0x4000` is ever written or erased, except by `full-restore`.** `0x0000`-`0x3FFF`
+  is the boot head that starts the firmware. In the script every erase and write of `restore`
+  and `repair-settings` goes through a single gate that refuses addresses below `0x4000`,
+  unaligned erases, and anything past the end of the flash. `full-restore` has its own gate
+  (whole 4 KiB sectors only, this unit's Bluetooth data and key_mac kept unless asked) and only
+  writes a head that passes the checks below.
 - **Never `erasechip`.** The script has no way to send it.
 - **Always back up first.** `restore` cannot write without a double-read, compared, saved backup.
 - **Write the extracted firmware region, never the `.fwsc` itself, and only at `0x4000`.**
@@ -230,6 +250,52 @@ Then unplug, switch off, wait 5 s, switch on.
   the SCSI inquiry as `WL82` before anything else is sent.
 - **Cancel Windows' "format disk" dialog.** Never format the `WL82 UBOOT1.00` disk.
 - If verification fails: **do not power off**. Run `restore` again (another cable or port helps).
+
+## full-restore: everything, boot head included
+
+For a unit whose **boot head** (`0x0000`-`0x3FFF`, the stock bootloader and its configuration)
+was replaced or damaged, typically by installing a replacement bootloader that then does not
+start. The firmware can be perfect and the unit still stays dark, and `restore` cannot help
+because it never writes the head.
+
+```sh
+python fm1_unbrick.py full-restore FM-1.fwsc --plan-only    # back up, show what would change, stop
+python fm1_unbrick.py full-restore FM-1.fwsc                # write it (type FULL)
+python fm1_unbrick.py full-restore --image my-backup.bin    # or: everything from a full backup
+```
+
+(Windows: `py` in an administrator PowerShell; Linux: `sudo .venv/bin/python`. Not on macOS:
+the USB route has no macOS back end, and the Transporter refuses the head.)
+
+- **From the package** (`FM-1.fwsc`): writes its whole flash image from `0x0`: for V15
+  `0x0..0x92FFF` (the stock V15 bootloader and firmware), for V16 `0x0..0xA8FFF` (V16's own,
+  larger stock bootloader and its longer firmware). Everything past the package's image stays as it
+  is. Both official packages are recognised by sha256 (V16: file `d017fb65…`, the same M-Flasher
+  documents).
+- **From a full backup** (`--image FULL.bin`, exactly 1 MiB, for example the backup M-Flasher or
+  this tool made before the change): writes all of it, including the factory voices
+  (`0xEA000..0xFBFFF`), which only a backup can bring back. This unit's own Bluetooth data
+  (`0xE9000..0xE9FFF`) and key_mac area (`0xFF000..0xFFFFF`) are kept, so another unit's backup
+  does not clone its Bluetooth identity; `--include-unit-data` writes them too (your own
+  backup).
+
+What it checks:
+
+- the usual: chip key and flash ID, the double-read backup before anything is written, the typed
+  confirmation;
+- **the head it writes must have valid JieLi headers**: header CRC, file-table CRCs, a
+  `uboot.boot` inside the head, the `isd_config.ini` data CRC. No override. The body of
+  `uboot.boot` itself has no checksum this tool can verify, which is why the next rule exists;
+- **the head must be the stock V15 or V16 one** (by sha256; two real V15 units carry exactly the
+  V15 head), unless you pass `--other-head`, for example to put back m-bootloader from your own
+  backup;
+- an image must not be blank or have torn firmware sectors;
+- only the 4 KiB sectors that differ are erased (sector erases only, never block or chip) and
+  written, each read back and retried once, **the head last**, then the whole flash is read and
+  compared with the expected image. `full-restore-result.json` in the run's folder records it.
+
+If it is interrupted while the head is written, the FM-1 will not start until the command has
+run again: keep it plugged in and run the same command again.
 
 ## Settings corrupted after going back to stock
 
@@ -308,8 +374,9 @@ known to carry data:
   reports that V15 boots even with old Felucca data present. (`--force-write` rewrites a region
   that already matches, which only helps if you suspect the flash itself.)
 - **"boot head DIFFERS from the official V15 package's head"**: your boot head is not the
-  stock one. This tool never writes it. Restoring V15 is still the first thing to try; if the
-  FM-1 stays black with a verified write, ask for help in the community before going further.
+  stock one (M-Flasher can replace it with m-bootloader, for example). `restore` never writes
+  it. If the FM-1 stays black after a verified `restore`, put the stock head back with
+  `full-restore FM-1.fwsc` ([above](#full-restore-everything-boot-head-included)).
 - **On-device songs**: stock firmware may overwrite the area where Felucca keeps projects;
   they are in your backup.
 

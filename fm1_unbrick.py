@@ -12,6 +12,10 @@ boot mode through kagaimiq's jl-uboot-tool (MIT), backs up the whole flash
 twice, extracts the firmware region from an FM-1 .fwsc package and writes
 it at 0x4000, then reads it back and compares every byte.
 
+`full-restore` rewrites everything, the boot head included, from the official
+package or from a full backup: for a unit whose bootloader was replaced or
+damaged by another tool (e.g. a replacement bootloader that does not start).
+
 Two helpers for a unit that still runs: `softkey` sends the stock firmware's
 USB-MIDI key that drops it into that boot mode (any OS), and `repair-settings`
 puts the settings areas back to factory state after a custom firmware (stock
@@ -19,7 +23,10 @@ V15 reads that firmware's leftovers as its own settings).
 
 Safety rules, enforced in code:
   * nothing is ever erased or written below 0x4000 (the boot head), in
-    0xE9000..0xFBFFF (Bluetooth data, factory voices) or 0xFF000..0xFFFFF;
+    0xE9000..0xFBFFF (Bluetooth data, factory voices) or 0xFF000..0xFFFFF,
+    except by full-restore, which has its own gate: a head it writes must pass
+    the JieLi header checks, and this unit's Bluetooth data and key_mac area
+    are kept unless asked;
   * "erase chip" is never used;
   * a verified double backup is taken before any write;
   * the chip key (0x980F) and flash ID (0x856014 or 0xB36014) must match an FM-1.
@@ -47,7 +54,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-TOOL_VERSION = "1.2.1"
+TOOL_VERSION = "1.3.0"
 
 # --------------------------------------------------------------------------
 # Flash layout of the FM-1 (1 MiB SPI NOR flash)
@@ -56,7 +63,7 @@ TOOL_VERSION = "1.2.1"
 FLASH_SIZE = 0x100000
 SECTOR_SIZE = 0x1000           # smallest erase unit
 BLOCK_SIZE = 0x10000           # large erase unit
-PROTECTED_END = 0x4000         # 0x0000..0x3FFF = boot head: NEVER erased or written
+PROTECTED_END = 0x4000         # 0x0000..0x3FFF = boot head: written only by full-restore
 FW_START = 0x4000              # firmware region: app, SDK files, loader
 FW_LEN = 0x8F000
 FW_END = FW_START + FW_LEN     # 0x93000 (exclusive)
@@ -109,6 +116,18 @@ DEVICE_MODEL = "WL82 UBOOT1.00"
 V15_IDENTITY = "FM-1_015"
 V15_FLASH_FW_SHA256 = "6edf3c37fb5bbbc33607c89375ee024d5477c17914d72221c8c68e58a8255686"
 V15_FILE_SHA256 = "db1642b2b6fa5c2cccb11ffd13878068bb28601678d3644049f99dc40e7edb8a"
+# The boot head 0x0000..0x3FFF of the official V15 package's flash.bin (the stock bootloader
+# and its configuration). Two real units' dumps carry exactly this head.
+V15_HEAD_SHA256 = "d9f43191777656de01c7bed4f9e9ba2e34e94832c5d2ed02c3fc7ab7a6d9bd67"
+# Official V16 (FM-1_016, 2026-10-21): its firmware runs to 0xA8FFF, past the V15 firmware
+# region, and it carries a larger stock bootloader. File sha256 as M-Flasher documents it.
+V16_IDENTITY = "FM-1_016"
+V16_FILE_SHA256 = "d017fb65e70aca97ee29d944470c3515a74581df5c0576bf70de917c7b2b61d5"
+V16_FIRMWARE_SHA256 = "c47d8895963c070f9334efd6a617d7aae5daf8480ffcf3438ffb634c03de8ef7"  # 0x4000..0xA8FFF
+V16_HEAD_SHA256 = "8f5228c2d6ea2068838ef4916f946bea877d14b07e6cfca49e41957f4c7b234f"
+V16_REGION_SHA256 = "980ff51ae2d90004cf3887602ebd11cd31796977410eb77cc7faabad4023003c"  # 0x4000..0x92FFF
+KNOWN_HEADS = {V15_HEAD_SHA256: "the stock V15 bootloader (sha256 verified)",
+               V16_HEAD_SHA256: "the stock V16 bootloader (sha256 verified)"}
 
 # .fwsc packaging: the first FWSC_MARKED_BLOCKS blocks of FWSC_BLOCK data
 # bytes are each followed by one marker byte. The markers spell the package
@@ -352,6 +371,12 @@ class Package:
         self.firmware_sha256 = sha256(self.firmware)
         self.head_sha256 = sha256(self.head)
         self.kind, self.description = classify(self.identity, self.firmware_sha256)
+        # Where the package's flash image really ends (its trailing 0xFF is padding).
+        data_end = len(self.flash.rstrip(b"\xff"))
+        self.end = max(FW_END, (data_end + SECTOR_SIZE - 1) // SECTOR_SIZE * SECTOR_SIZE)
+        if self.identity == V16_IDENTITY and self.kind != "official-v15":
+            if sha256(self.flash[FW_START:self.end]) == V16_FIRMWARE_SHA256:
+                self.kind, self.description = "official-v16", "official M-VAVE V16 (sha256 verified)"
 
     @classmethod
     def load(cls, path):
@@ -378,6 +403,18 @@ class Package:
                             "genuine FM-1.fwsc (sha256 %s); informational only", V15_FILE_SHA256)
         log.debug("  package head sha256 %s", self.head_sha256)
 
+    def check_fits_firmware_region(self, what="`restore`"):
+        """Refuse a package whose firmware runs past 0x92FFF (V16 does): writing only
+        0x4000..0x92FFF of it would leave an incomplete firmware."""
+        if self.end > FW_END:
+            raise SafetyError(
+                "%s (%s) has firmware up to 0x%X, past 0x%X, the end of what %s writes. "
+                "Writing only part of it would leave an incomplete firmware, so nothing is "
+                "written. Use the official V15, or `fm1_unbrick.py full-restore %s` (Windows or "
+                "Linux), which writes all of it with its own bootloader."
+                % (self.path.name, self.identity or "no identity", self.end - 1, FW_END - 1, what,
+                   self.path.name))
+
     def check_writable(self, i_know=False):
         """Refuse packages that must not be written."""
         if self.firmware.count(0xFF) == len(self.firmware) or not any(self.firmware):
@@ -395,6 +432,8 @@ class Package:
         if self.kind == "official-other":
             log.warning("NOTE: this package cannot be hash-verified; official V15 is the "
                         "recommended path.")
+        if self.end > FW_END:
+            log.info("  firmware runs to     0x%X (past the V15 firmware region)", self.end - 1)
 
 
 # --------------------------------------------------------------------------
@@ -1130,8 +1169,8 @@ def analyse_dump(data: bytes, packages=()):
             if head == pkg.head:
                 log.info("  boot head matches the official V15 package's head")
             else:
-                log.warning("  boot head DIFFERS from the official V15 package's head. This "
-                            "tool never writes the boot head; see README, Troubleshooting.")
+                log.warning("  boot head DIFFERS from the official V15 package's head. "
+                            "`restore` never writes it; `full-restore` does (see README).")
         else:
             log.info("  boot head %s %s's head (informational: third-party packages may "
                      "carry their own head)", "matches" if head == pkg.head else "differs from",
@@ -1297,6 +1336,7 @@ def cmd_extract(args):
         return EXIT_FAIL
     if args.verify_v15:
         log.info("V15 hash verified.")
+    pkg.check_fits_firmware_region("`extract`")
     out = Path(args.out)
     out.write_bytes(pkg.firmware)
     log.info("Wrote %s (0x%X bytes); write it at 0x%X only.", out, len(pkg.firmware), FW_START)
@@ -1308,6 +1348,7 @@ def cmd_restore(args, device=None):
     pkg = Package.load(args.package)
     pkg.log_summary()
     pkg.check_writable(args.i_know)
+    pkg.check_fits_firmware_region()
     if args.verify_v15 and pkg.kind != "official-v15":
         raise SafetyError("--verify-v15 given but this is not the verified official V15")
 
@@ -1606,6 +1647,314 @@ def cmd_repair_settings(args, device=None):
         log.info("Step 7/7: settings areas repaired: %d sectors erased, %d written, verified.",
                  len(sectors), len(written))
         log.info(REPAIR_DONE_TEXT)
+        return EXIT_OK
+    return with_device(args, run, device)
+
+
+# --------------------------------------------------------------------------
+# full-restore: everything, the boot head included
+# --------------------------------------------------------------------------
+#
+# A boot head replaced or damaged by another tool leaves a unit dark even with
+# good firmware, and `restore` never writes the head. full-restore does: from
+# a package (its flash.bin over 0x0..0x92FFF: the stock bootloader and the
+# firmware) or from a full 1 MiB backup (all of it). It has its own gate,
+# _check_full; every other command keeps the 0x4000 rule. Only 4 KiB sector
+# erases, only the sectors that differ, each read back; the head goes last.
+
+HEAD_ENTRY = 0x20
+# Per-unit data a full image must not overwrite unless asked (--include-unit-data).
+UNIT_DATA = ((BTIF_START, USR_START, "this unit's Bluetooth data"),
+             (KEY_MAC_START, FLASH_SIZE, "this unit's key_mac area"))
+
+
+def parse_head(head: bytes):
+    """Check the JieLi flash header of a boot head (0x0000..0x3FFF): the header
+    CRC, each file entry's CRC, a uboot.boot inside the head, and the data CRC of
+    isd_config.ini when there is one. Returns the entries; raises UnbrickError."""
+    if len(head) != PROTECTED_END:
+        raise UnbrickError("a boot head is 0x%X bytes, not 0x%X" % (PROTECTED_END, len(head)))
+    if head.count(0xFF) == len(head) or not any(head):
+        raise UnbrickError("the boot head is blank")
+    hdr = _jl_enc(head[:HEAD_ENTRY])
+    if _crc16(hdr[2:HEAD_ENTRY]) != _u16(hdr, 0):
+        raise UnbrickError("the boot head's header CRC fails: not a JieLi flash header")
+    files = []
+    for i in range(1, PROTECTED_END // HEAD_ENTRY):
+        e = _jl_enc(head[i * HEAD_ENTRY:(i + 1) * HEAD_ENTRY])
+        if _crc16(e[2:HEAD_ENTRY]) != _u16(e, 0):
+            break
+        _hcrc, dcrc, off, size, attr = struct.unpack("<HHIIB", e[:13])
+        name = e[16:32].split(b"\0")[0].decode("ascii", "replace")
+        files.append({"name": name, "offset": off, "size": size, "crc": dcrc, "attr": attr})
+    byname = {f["name"]: f for f in files}
+    boot = byname.get("uboot.boot")
+    if boot is None:
+        raise UnbrickError("the boot head has no uboot.boot entry")
+    if not (HEAD_ENTRY <= boot["offset"] and boot["size"] > 0
+            and boot["offset"] + boot["size"] <= PROTECTED_END):
+        raise UnbrickError("uboot.boot (0x%X bytes at 0x%X) is not inside the boot head"
+                           % (boot["size"], boot["offset"]))
+    cfg = byname.get("isd_config.ini")
+    if cfg is not None:
+        if cfg["offset"] + cfg["size"] > PROTECTED_END:
+            raise UnbrickError("isd_config.ini runs past the boot head")
+        if _crc16(head[cfg["offset"]:cfg["offset"] + cfg["size"]]) != cfg["crc"]:
+            raise UnbrickError("isd_config.ini's data CRC fails: the boot head is damaged")
+    return files
+
+
+def describe_head(head: bytes) -> str:
+    if sha256(head) in KNOWN_HEADS:
+        return KNOWN_HEADS[sha256(head)]
+    try:
+        files = parse_head(head)
+    except UnbrickError as e:
+        return "not a valid boot head (%s)" % e
+    return ("NOT the stock V15 bootloader; its headers are valid (files: %s), its "
+            "bootloader body cannot be checked" % ", ".join(f["name"] for f in files))
+
+
+def torn_sectors(data: bytes, start: int, end: int):
+    """Sectors that end in >= 256 bytes of 0xFF from a 256-byte page boundary
+    (an interrupted write), padding with real data after it excluded."""
+    out = []
+    for a in range(start, end, SECTOR_SIZE):
+        sec = data[a:a + SECTOR_SIZE]
+        tail = len(sec) - len(sec.rstrip(b"\xff"))
+        if 256 <= tail < SECTOR_SIZE and (SECTOR_SIZE - tail) % 256 == 0:
+            out.append(a)
+    return out
+
+
+class FullSource:
+    """What full-restore writes: `image` covers [0, `end`) (the rest stays as on the unit)."""
+
+    def __init__(self, path, kind, image, end, description):
+        self.path, self.kind, self.image, self.end = Path(path), kind, image, end
+        self.description = description
+        self.head = image[:PROTECTED_END]
+
+
+def load_full_source(args) -> FullSource:
+    if bool(args.package) == bool(args.image):
+        raise UnbrickError("give either a package (.fwsc) or --image FULL.bin")
+    if args.package:
+        pkg = Package.load(args.package)
+        pkg.log_summary()
+        pkg.check_writable(args.i_know)
+        if args.verify_v15 and pkg.kind != "official-v15":
+            raise SafetyError("--verify-v15 given but this is not the verified official V15")
+        if pkg.end > VM_END:
+            raise SafetyError("%s has data up to 0x%X, into the per-unit and factory areas; "
+                              "refusing" % (pkg.path.name, pkg.end - 1))
+        image = pkg.flash[:pkg.end].ljust(pkg.end, b"\xff")
+        src = FullSource(pkg.path, "package", image, pkg.end,
+                         "%s = %s" % (pkg.identity or "(none)", pkg.description))
+    else:
+        path = Path(args.image)
+        try:
+            data = path.read_bytes()
+        except OSError as e:
+            raise UnbrickError("cannot read --image %s: %s" % (path, e))
+        if len(data) != FLASH_SIZE:
+            raise UnbrickError("--image %s is 0x%X bytes; a full flash image is exactly 0x%X "
+                               "(1 MiB)" % (path, len(data), FLASH_SIZE))
+        fw = data[FW_START:FW_END]
+        if fw.count(0xFF) == len(fw) or not any(fw):
+            raise SafetyError("the firmware region of %s is blank; refusing" % path.name)
+        torn = torn_sectors(data, FW_START, FW_END)
+        if torn:
+            raise SafetyError("%s has torn firmware sectors %s (an interrupted write: a dump of "
+                              "a damaged unit, not a good backup); refusing"
+                              % (path.name, ranges_text(torn)))
+        v15 = sha256(fw) == V15_FLASH_FW_SHA256
+        if args.verify_v15 and not v15:
+            raise SafetyError("--verify-v15 given but the firmware region of %s is not the "
+                              "verified official V15" % path.name)
+        src = FullSource(path, "image", data, FLASH_SIZE, "full flash image; firmware region %s"
+                         % ("= official V15 (sha256 verified)" if v15 else "not a known package"))
+        log.info("Image       %s", path)
+        log.info("  sha256           %s", sha256(data))
+        log.info("  firmware sha256  %s", sha256(fw))
+    try:
+        parse_head(src.head)
+    except UnbrickError as e:
+        raise SafetyError("%s: %s. Refusing to write this head (no override)." % (src.path.name, e))
+    log.info("  boot head        %s", describe_head(src.head))
+    if sha256(src.head) not in KNOWN_HEADS and not args.other_head:
+        raise SafetyError(
+            "the boot head of %s has valid headers but is not the stock V15 or V16 bootloader. "
+            "Writing it is allowed only with --other-head. The official V15 and V16 packages "
+            "carry the stock heads." % src.path.name)
+    return src
+
+
+def _check_full(addr: int, length: int, keep_unit: bool):
+    """The gate of full-restore: whole 4 KiB sectors inside the flash, and this
+    unit's Bluetooth data and key_mac area only with --include-unit-data."""
+    if length <= 0 or addr % SECTOR_SIZE or length % SECTOR_SIZE:
+        raise SafetyError("full-restore 0x%X+0x%X is not whole 4 KiB sectors; refusing"
+                          % (addr, length))
+    if addr < 0 or addr + length > FLASH_SIZE:
+        raise SafetyError("0x%X+0x%X runs past the end of the flash" % (addr, length))
+    if keep_unit:
+        for start, end, what in UNIT_DATA:
+            if addr < end and addr + length > start:
+                raise SafetyError("refusing to touch 0x%X+0x%X: 0x%X..0x%X is %s "
+                                  "(--include-unit-data overrides)"
+                                  % (addr, length, start, end - 1, what))
+
+
+def full_expected(dump: bytes, src: FullSource, keep_unit: bool) -> bytes:
+    img = bytearray(dump)
+    img[:src.end] = src.image[:src.end]
+    if keep_unit:
+        for start, end, _ in UNIT_DATA:
+            img[start:end] = dump[start:end]
+    return bytes(img)
+
+
+def full_sectors(dev: Fm1Device, expected: bytes, sectors, keep_unit: bool):
+    """Erase (one 4 KiB sector), write (unless blank) and read back each sector;
+    retry a sector once."""
+    prog = Progress("Writing", len(sectors) * SECTOR_SIZE)
+    try:
+        for addr in sectors:
+            target = expected[addr:addr + SECTOR_SIZE]
+            for attempt in (1, 2):
+                _check_full(addr, SECTOR_SIZE, keep_unit)
+                dev.ldr.flash_erase_sector(addr)
+                if target != BLANK_SECTOR:
+                    for off in range(0, SECTOR_SIZE, dev.io_max):
+                        chunk = target[off:off + dev.io_max]
+                        dev.ldr.flash_write(addr + off, chunk)
+                back = read_flash(dev, addr, SECTOR_SIZE, None)
+                if back == target:
+                    break
+                first = next(i for i in range(SECTOR_SIZE) if back[i] != target[i])
+                log.error("  sector 0x%05X: read-back MISMATCH, first at 0x%05X", addr,
+                          addr + first)
+                if attempt == 1:
+                    log.info("  Retrying sector 0x%05X once", addr)
+            else:
+                raise UnbrickError("sector 0x%05X still reads back wrong after two attempts"
+                                   % addr, EXIT_DANGER)
+            prog.update(SECTOR_SIZE)
+    finally:
+        prog.close()
+
+
+FULL_DANGER_TEXT = """
+!!! The full restore could not be completed or verified. !!!
+  * Do NOT power off or unplug the FM-1: it is still in its ROM boot mode, and the
+    same command can finish the job.
+  * Re-run the same full-restore command (it backs up again and writes only the
+    sectors that still differ), if possible with another cable or USB port.
+  * Your backup from before this run: %s
+"""
+
+FULL_DONE_TEXT = """
+Done: everything written and verified. Now:
+  1. Unplug the USB cable.
+  2. Switch the FM-1 off.
+  3. Wait 5 seconds.
+  4. Switch it on.
+"""
+
+
+def cmd_full_restore(args, device=None):
+    log.info("Step 1/7: source")
+    src = load_full_source(args)
+    keep_unit = not args.include_unit_data
+
+    def run(dev):
+        log.info("Step 2/7: device")
+        check_identity(dev, args.i_know)
+        log.info("Step 3/7: backup (mandatory)")
+        backup_path, dump = take_backup(dev, Path("backups"))
+        log.info("  boot head on the unit now: %s", describe_head(dump[:PROTECTED_END]))
+
+        log.info("Step 4/7: plan")
+        expected = full_expected(dump, src, keep_unit)
+        diff = [a for a in range(0, FLASH_SIZE, SECTOR_SIZE)
+                if dump[a:a + SECTOR_SIZE] != expected[a:a + SECTOR_SIZE]]
+        head = [a for a in diff if a < PROTECTED_END]
+        rest = [a for a in diff if a >= PROTECTED_END]
+        order = rest + head                     # the head goes last
+        for a in order:
+            _check_full(a, SECTOR_SIZE, keep_unit)
+        kept = []
+        if keep_unit and src.kind == "image":
+            kept = [what for start, end, what in UNIT_DATA
+                    if src.image[start:end] != dump[start:end]]
+        log.info("  %d sectors differ: head %d, firmware %d, data %d", len(diff), len(head),
+                 sum(1 for a in rest if a < FW_END), sum(1 for a in rest if a >= FW_END))
+        for what in kept:
+            log.info("  kept as on the unit: %s (the image's copy differs)", what)
+
+        def result(ok, final_sha=None, error=None):
+            write_report(dev, "full-restore-result.json", dict(
+                dev.report, source=src.path.name, source_kind=src.kind,
+                source_head_sha256=sha256(src.head), unit_data_kept=keep_unit,
+                sectors_changed=["0x%05x" % a for a in order],
+                final_sha256=final_sha, ok=ok, error=error))
+
+        if not diff:
+            log.info("The flash already holds exactly this; nothing to write.")
+            result(True, sha256(dump))
+            log.info(FULL_DONE_TEXT)
+            return EXIT_OK
+        if args.plan_only:
+            log.info("PLAN ONLY: nothing written (drop --plan-only to write %d sectors)",
+                     len(diff))
+            return EXIT_OK
+
+        log.info("Step 5/7: confirmation")
+        confirm(args, [
+            "",
+            "About to REWRITE the FM-1 flash, boot head included:",
+            "  device    %s (%s %s)%s" % (dev.path, dev.vendor, dev.product,
+                                          "  [MOCK]" if dev.mock else ""),
+            "  source    %s (%s)" % (src.path.name, src.description),
+            "  head      %s" % ("%d sectors: %s" % (len(head), describe_head(src.head))
+                                if head else "unchanged"),
+            "  write     %d sectors of 4 KiB: %s" % (len(diff), ranges_text(diff)),
+            "  kept      %s" % ("this unit's Bluetooth data 0x%X..0x%X and key_mac 0x%X..0x%X"
+                                % (BTIF_START, USR_START - 1, KEY_MAC_START, FLASH_SIZE - 1)
+                                if keep_unit else "nothing (--include-unit-data)"),
+            "  backup    %s" % backup_path,
+            "  If this is interrupted while the head is written, the FM-1 will not start",
+            "  until this command is run again.",
+            "",
+        ], "FULL")
+
+        log.info("Step 6/7: erase + write + verify, sector by sector, head last. Do not "
+                 "unplug anything now.")
+        try:
+            full_sectors(dev, expected, order, keep_unit)
+            log.info("Final check: reading back the whole flash")
+            final = read_flash(dev, 0, FLASH_SIZE, "Final read")
+            log.info("  read-back sha256 %s", sha256(final))
+            if final != expected:
+                first = next(i for i in range(FLASH_SIZE) if final[i] != expected[i])
+                raise UnbrickError("the final read differs from the expected image, first at "
+                                   "0x%05X" % first, EXIT_DANGER)
+        except KeyboardInterrupt:
+            log.error("Interrupted during the write.")
+            log.error(FULL_DANGER_TEXT % backup_path)
+            result(False, error="interrupted")
+            return EXIT_DANGER
+        except Exception as e:
+            log.error("Write failed: %s", e)
+            log.error(FULL_DANGER_TEXT % backup_path)
+            result(False, error=str(e))
+            return EXIT_DANGER
+        result(True, sha256(final))
+        log.info("  equals the expected image byte for byte")
+        log.info("Step 7/7: %d sectors written and verified (head: %s).", len(diff),
+                 "%d sectors" % len(head) if head else "unchanged")
+        log.info(FULL_DONE_TEXT)
         return EXIT_OK
     return with_device(args, run, device)
 
@@ -2063,6 +2412,26 @@ def build_parser():
     p.add_argument("--force-write", action="store_true",
                    help="write even if the device already holds this exact firmware")
 
+    p = sub.add_parser("full-restore", parents=[common],
+                       help="backup + rewrite everything that differs, boot head included, "
+                            "from a package or a full backup + verify")
+    p.add_argument("package", nargs="?",
+                   help="a .fwsc: writes its whole flash image from 0x0 (its stock bootloader + "
+                        "firmware: to 0x92FFF for V15, to 0xA8FFF for V16)")
+    p.add_argument("--image", metavar="FULL.bin",
+                   help="a full 1 MiB backup: writes all of it (except this unit's Bluetooth "
+                        "data and key_mac area, see --include-unit-data)")
+    p.add_argument("--other-head", action="store_true",
+                   help="allow a boot head with valid headers that is not the stock V15 or V16 one")
+    p.add_argument("--include-unit-data", action="store_true",
+                   help="also write the image's 0xE9000..0xE9FFF (Bluetooth data) and "
+                        "0xFF000..0xFFFFF (key_mac), e.g. restoring this unit's own backup")
+    p.add_argument("--verify-v15", action="store_true",
+                   help="refuse unless the firmware region is the verified official V15")
+    p.add_argument("--plan-only", action="store_true",
+                   help="back up and show what would be written, then stop")
+    p.add_argument("--yes", action="store_true", help="skip the typed confirmation")
+
     p = sub.add_parser("softkey", parents=[common],
                        help="send a running FM-1 the USB-MIDI key into ROM boot mode (any OS)")
     p.add_argument("--port", help="the FM-1's MIDI port name (default: the single one named FM-1)")
@@ -2097,6 +2466,8 @@ def main(argv=None, device=None, midi=None):
             return cmd_extract(args)
         if args.command == "restore":
             return cmd_restore(args, device)
+        if args.command == "full-restore":
+            return cmd_full_restore(args, device)
         if args.command == "softkey":
             return cmd_softkey(args, midi)
         if args.command == "repair-settings":

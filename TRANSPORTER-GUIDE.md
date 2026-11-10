@@ -163,6 +163,36 @@ confirmation. Every command has `--dry-run`, which drives an in-memory mock Tran
 of a serial port; `--mock-flash DUMP.bin` seeds the mock from a real dump, which is how the flow
 was rehearsed before the real write.
 
+### From a full flash backup instead of a package
+
+If you have a full 1 MiB backup of a working FM-1 (a factory backup, or a dump of your own unit
+taken while it was healthy), `restore` and `recover` can take its application region instead of a
+`.fwsc`:
+
+```sh
+python3 fm1_transporter_recover.py recover --image factory-backup.bin
+python3 fm1_transporter_recover.py restore --image factory-backup.bin --ref backups/<dump>.bin   # dry run, then --write
+```
+
+It works on macOS, Linux and Windows like the rest of this route. What it writes is the same as
+with a package: only the 4 KiB sectors of `0x4000..0x92FFF` that differ. The Transporter firmware
+refuses everything else, so **the boot head and the device data (settings, sounds) of the backup
+are not written**. The script reports how many device-data sectors differ. To bring the factory
+settings back afterwards, use `fm1_unbrick.py repair-settings --factory factory-backup.bin` on
+Windows or Linux (README, "Settings corrupted after going back to stock").
+
+On top of the usual checks, the image is refused if:
+
+- it is not exactly 1 MiB;
+- its application region is blank, or has torn sectors (a dump of a unit whose update was
+  interrupted is not a good backup);
+- its head differs from your unit's and its application region is not the hash-verified V15.
+  Firmware from a backup belongs with that backup's head, and the head here is never written.
+  An image whose application region is V15 is treated like the V15 package: a different head is
+  reported, and only the application region is written.
+
+`--verify-v15` works with `--image` too: it refuses an image whose application region is not V15.
+
 ## What the dump showed (the author's unit, 2026-10-09)
 
 The two reads were identical (sha256 `6c075920…`). Against the V15 package and the two
@@ -195,7 +225,8 @@ leaves every interruption in a state the stub turns into a rescue.
 ## Rules
 
 - **The boot head `0x0000..0x3FFF` is never written.** The Transporter firmware refuses it, and
-  so does the script. A package whose head differs from the unit's is reported, and only
+  so does the script. To put a stock head back, use `fm1_unbrick.py full-restore` on Windows or
+  Linux (README). A package whose head differs from the unit's is reported, and only
   `0x4000..0x92FFF` is written.
 - **No chip erase, no block erase.** Only whole 4 KiB sectors in `0x4000..0x92FFF`, each erased,
   written and read back.

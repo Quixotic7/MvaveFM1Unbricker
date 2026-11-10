@@ -26,6 +26,11 @@ Safety rules, enforced in code:
   * without --write, restore is a dry run;
   * a final full read must equal the expected image.
 
+A full 1 MiB flash backup can stand in for the package (`--image FULL.bin` on
+restore / recover): only its application region is written, under the same
+rules, and an image whose head differs from the unit's is refused unless its
+application region is the verified V15.
+
 For a first-time user: `setup` (fetches JieLi's loader, builds the Transporter
 firmware from the prebuilt placeholder in transporter/, installs pyserial), then
 `wizard --v15 FM-1.fwsc` (every step, with prompts).
@@ -51,7 +56,7 @@ from pathlib import Path
 
 import fm1_unbrick as fu
 
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.1.0"
 
 FLASH_SIZE = fu.FLASH_SIZE            # 1 MiB SPI NOR
 SECTOR = fu.SECTOR_SIZE               # 4 KiB, the only write unit
@@ -811,7 +816,7 @@ def load_labelled(v15_path=None, package_paths=(), extra=None):
     for p in package_paths or ():
         add(Path(p).stem, fu.Package.load(p))
     if extra is not None:
-        if v15 is None and extra.kind == "official-v15":
+        if v15 is None and extra.kind == "official-v15" and not getattr(extra, "is_image", False):
             v15 = extra
             add("V15", extra)
         else:
@@ -822,6 +827,92 @@ def load_labelled(v15_path=None, package_paths=(), extra=None):
 def package_region(pkg) -> bytes:
     """The package's flash image over [0, 0x93000): raw flash from address 0."""
     return pkg.flash[:APP_END]
+
+
+class FlashImage:
+    """A full 1 MiB flash image (a factory backup, or a dump of a working unit) used
+    as the restore source in place of a .fwsc. It offers the attributes Plan,
+    restore_session and the analysis read from a fu.Package. Only its application
+    region 0x4000..0x92FFF is ever written: the Transporter firmware refuses the
+    head and the device data, whatever the host asks."""
+
+    is_image = True
+
+    def __init__(self, path, data):
+        self.path = Path(path)
+        if len(data) != FLASH_SIZE:
+            raise fu.UnbrickError("--image %s is 0x%X bytes; a full flash image is exactly "
+                                  "0x%X (1 MiB)" % (self.path, len(data), FLASH_SIZE))
+        self.flash = bytes(data)
+        self.fl_len = FLASH_SIZE
+        self.identity = ""
+        self.file_sha256 = fu.sha256(data)
+        self.head = self.flash[:HEAD_END]
+        self.head_sha256 = fu.sha256(self.head)
+        self.firmware = self.flash[APP_START:APP_END]
+        self.firmware_sha256 = fu.sha256(self.firmware)
+        if self.firmware_sha256 == fu.V15_FLASH_FW_SHA256:
+            self.kind = "official-v15"
+            self.description = "full flash image; its application region is official V15 " \
+                               "(sha256 verified)"
+        else:
+            self.kind = "image"
+            self.description = "full flash image; its application region is not a known " \
+                               "package"
+
+    @classmethod
+    def load(cls, path):
+        path = Path(path)
+        try:
+            data = path.read_bytes()
+        except OSError as e:
+            raise fu.UnbrickError("cannot read --image %s: %s" % (path, e))
+        return cls(path, data)
+
+    def log_summary(self):
+        log.info("Image       %s", self.path)
+        log.info("  file sha256      %s", self.file_sha256)
+        log.info("  what             %s", self.description)
+        log.info("  head sha256      %s (0x0..0x%X, never written)", self.head_sha256,
+                 HEAD_END - 1)
+        log.info("  app sha256       %s (0x%X..0x%X)", self.firmware_sha256, APP_START,
+                 APP_END - 1)
+
+    def check_writable(self, i_know=False):
+        """Refuse images whose application region must not be written."""
+        fw = self.firmware
+        if fw.count(0xFF) == len(fw) or not any(fw):
+            raise fu.SafetyError("the application region of %s is blank; refusing"
+                                 % self.path.name)
+        if self.head_sha256 == fu.V16_HEAD_SHA256 or self.firmware_sha256 == fu.V16_REGION_SHA256:
+            raise fu.SafetyError("%s holds the official V16, whose firmware runs past 0x92FFF; "
+                                 "the Transporter cannot write past 0x92FFF, so restoring only "
+                                 "part of it would leave an incomplete firmware. Use the official "
+                                 "V15 here." % self.path.name)
+        torn = [x for x in range(APP_START, APP_END, SECTOR)
+                if classify_sector(self.flash, x, ()) == "TORN"]
+        if torn:
+            raise fu.SafetyError("%s has torn application sectors %s (an interrupted write: "
+                                 "this is a dump of a damaged unit, not a good backup); refusing"
+                                 % (self.path.name, hexlist(torn)))
+
+
+def load_restore_source(args):
+    """The restore source: --image FULL.bin, or the package (positional)."""
+    image = getattr(args, "image", None)
+    if not image:
+        return load_restore_package(args.package, args.verify_v15)
+    if args.package:
+        raise fu.UnbrickError("give either a package or --image, not both")
+    img = FlashImage.load(image)
+    img.log_summary()
+    img.check_writable()
+    if args.verify_v15 and img.kind != "official-v15":
+        raise fu.SafetyError("--verify-v15 given but the application region of %s is not the "
+                             "verified official V15" % img.path.name)
+    if args.verify_v15:
+        log.info("V15 hash verified (application region of the image).")
+    return img
 
 
 # --------------------------------------------------------------------------
@@ -1172,8 +1263,9 @@ DANGER_TEXT = """
 !!! The write could not be completed or verified. !!!
   * Do NOT switch the FM-1 off and do NOT unplug the Transporter: it stays in UBOOT.
   * The head 0x0000-0x3FFF was not touched.
-  * Re-run `recover PACKAGE` (it dumps again and writes only the sectors that still
-    differ), or `dump DIR` and then `restore PACKAGE --ref <new dump> --write`.
+  * Re-run `recover PACKAGE` or `recover --image FULL.bin` (it dumps again and writes
+    only the sectors that still differ), or `dump DIR` and then
+    `restore PACKAGE --ref <new dump> --write` (or `restore --image FULL.bin ...`).
   * Your reference dump: %s
 """
 
@@ -1191,22 +1283,44 @@ class Plan:
                      if self.img[x:x + SECTOR] != ref[x:x + SECTOR]]
         self.head_diff = [x for x in self.diff if x < HEAD_END]
         self.write = [x for x in self.diff if APP_START <= x < APP_END]
+        self.is_image = getattr(pkg, "is_image", False)
+        self.what = "Image" if self.is_image else "Package"
+        self.data_diff = []
+        if self.is_image:
+            self.data_diff = [x for x in range(APP_END, FLASH_SIZE, SECTOR)
+                              if pkg.flash[x:x + SECTOR] != ref[x:x + SECTOR]]
+            if self.head_diff and pkg.kind != "official-v15":
+                raise fu.SafetyError(
+                    "the image's head 0x0000..0x3FFF differs from the unit's (sectors %s) and "
+                    "its application region is not the verified V15, so it may not fit this "
+                    "unit's boot head; refusing. The head is never written. Use a backup of "
+                    "this unit, or the official FM-1.fwsc." % hexlist(self.head_diff))
 
     def report(self):
         pkg = self.pkg
-        log.info("Package flash image 0x0..0x%X sha256 %s...; %d sector%s differ from --ref%s",
-                 APP_END - 1, fu.sha256(self.img)[:16], len(self.diff),
+        log.info("%s flash image 0x0..0x%X sha256 %s...; %d sector%s differ from --ref%s",
+                 self.what, APP_END - 1, fu.sha256(self.img)[:16], len(self.diff),
                  "" if len(self.diff) == 1 else "s",
                  ": " + hexlist(self.diff) if self.diff else "")
-        if pkg.fl_len > APP_END:
+        if self.is_image:
+            if self.data_diff:
+                log.warning("NOTE: the image's device data 0x%X..0x%X differs from the unit's in "
+                            "%d sector%s. It is NOT written (the Transporter refuses it): your "
+                            "settings and sounds stay as they are. To put the factory settings "
+                            "back, use `fm1_unbrick.py repair-settings --factory %s` on Windows "
+                            "or Linux.", APP_END, FLASH_SIZE - 1, len(self.data_diff),
+                            "" if len(self.data_diff) == 1 else "s", pkg.path.name)
+            else:
+                log.info("Device data 0x%X..0x%X: image == --ref", APP_END, FLASH_SIZE - 1)
+        elif pkg.fl_len > APP_END:
             log.info("  (the package's flash image continues past 0x%X; that part is ignored)",
                      APP_END - 1)
         if self.head_diff:
-            log.warning("NOTE: the package's head differs from the device's in sectors %s. The "
+            log.warning("NOTE: the %s's head differs from the device's in sectors %s. The "
                         "head 0x0000..0x3FFF is NEVER written; only the application sectors are.",
-                        hexlist(self.head_diff))
+                        self.what.lower(), hexlist(self.head_diff))
         else:
-            log.info("Head 0x0000..0x3FFF: package == --ref")
+            log.info("Head 0x0000..0x3FFF: %s == --ref", self.what.lower())
         log.info("Sectors to write in 0x%X..0x%X: %d", APP_START, APP_END - 1, len(self.write))
 
 
@@ -1219,6 +1333,8 @@ def load_restore_package(path, verify_v15):
     pkg = fu.Package.load(found)
     pkg.log_summary()
     pkg.check_writable(False)
+    pkg.check_fits_firmware_region("the Transporter (its firmware refuses anything past "
+                                   "0x92FFF)")
     if verify_v15 and pkg.kind != "official-v15":
         raise fu.SafetyError("--verify-v15 given but %s is not the verified official V15"
                              % pkg.path.name)
@@ -1247,7 +1363,8 @@ def restore_session(t: Transporter, plan: Plan, args, write: bool, confirm=None)
                  len(plan.write), "" if len(plan.write) == 1 else "s")
         return EXIT_OK
     if not plan.write:
-        log.info("Nothing to write: the application area already holds this package.")
+        log.info("Nothing to write: the application area already holds this %s.",
+                 plan.what.lower())
         log.info(DONE_TEXT)
         return EXIT_OK
 
@@ -1255,7 +1372,7 @@ def restore_session(t: Transporter, plan: Plan, args, write: bool, confirm=None)
         "",
         "About to WRITE the FM-1 flash through the Transporter:",
         "  port      %s%s" % (t.port, "  [MOCK]" if t.mock else ""),
-        "  package   %s" % plan.pkg.path.name,
+        "  %-9s %s" % (plan.what.lower(), plan.pkg.path.name),
         "  identity  %s = %s" % (plan.pkg.identity or "(none)", plan.pkg.description),
         "  sectors   %d of 4 KiB in 0x%X..0x%X (head 0x0000-0x3FFF never written)"
         % (len(plan.write), APP_START, APP_END - 1),
@@ -1549,8 +1666,8 @@ def cmd_analyse(args):
 
 
 def cmd_restore(args, transporter=None):
-    log.info("Step 1/4: package")
-    pkg = load_restore_package(args.package, args.verify_v15)
+    log.info("Step 1/4: %s", "image" if args.image else "package")
+    pkg = load_restore_source(args)
     log.info("Step 2/4: reference dump")
     ref_path = Path(args.ref)
     try:
@@ -1569,8 +1686,8 @@ def cmd_restore(args, transporter=None):
 
 
 def cmd_recover(args, transporter=None):
-    log.info("Step 1/5: package")
-    pkg = load_restore_package(args.package, args.verify_v15)
+    log.info("Step 1/5: %s", "image" if args.image else "package")
+    pkg = load_restore_source(args)
     labelled, v15 = load_labelled(args.v15, args.extra_package, extra=pkg)
 
     def run(t):
@@ -2192,10 +2309,13 @@ def build_parser():
     p = sp("analyse", "offline report on a full dump")
     p.add_argument("dump")
     labels(p)
-    p = sp("restore", "write the differing app sectors of PACKAGE (dry run without --write)")
+    p = sp("restore", "write the differing app sectors of PACKAGE or --image FULL.bin (dry run "
+                      "without --write)")
     p.add_argument("package", nargs="?",
                    help="the .fwsc (default: the official V15 found next to you / the script)")
     p.add_argument("--ref", required=True, help="full dump; a fresh read must equal it")
+    p.add_argument("--image", help="a full 1 MiB flash image (e.g. a factory backup) to take "
+                   "the application region 0x4000..0x92FFF from, in place of a package")
     p.add_argument("--write", action="store_true", help="actually write (default: dry run)")
     p.add_argument("--yes", action="store_true", help="skip the typed WRITE confirmation")
     p.add_argument("--verify-v15", action="store_true",
@@ -2204,6 +2324,8 @@ def build_parser():
     p.add_argument("package", nargs="?",
                    help="the .fwsc (default: the official V15 found next to you / the script)")
     p.add_argument("--out", default="backups", help="dump folder (default: ./backups)")
+    p.add_argument("--image", help="a full 1 MiB flash image (e.g. a factory backup) to take "
+                   "the application region 0x4000..0x92FFF from, in place of a package")
     p.add_argument("--package", dest="extra_package", action="append", default=[],
                    help="extra .fwsc to label app sectors in the analysis (repeatable)")
     p.add_argument("--v15", help="the official FM-1.fwsc (V15) for the head comparison")

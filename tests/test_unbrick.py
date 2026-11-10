@@ -34,6 +34,8 @@ ORACLE_FWSC = Path(os.environ.get(
     "FM1_ORACLE_FWSC", PROJECTS / "ChoralRootFM1" / "build" / "choralroot.fwsc"))
 V15_FWSC = Path(os.environ.get(
     "FM1_V15_FWSC", PROJECTS / "MVaveOfficial" / "V15-FM-1.fwsc"))
+V16_FWSC = Path(os.environ.get(
+    "FM1_V16_FWSC", PROJECTS / "MVaveOfficial" / "V16-FM-1.fwsc"))
 ORACLE_TOOLS = Path(os.environ.get(
     "FM1_ORACLE_TOOLS", PROJECTS / "ChoralRootFM1" / "tools"))
 JLUB_DIR = Path(os.environ.get("FM1_JLUB_DIR", ROOT / "jl-uboot-tool"))
@@ -108,7 +110,7 @@ class Workdir(unittest.TestCase):
         self._tmp.cleanup()
 
     def package(self, identity="FM-1_920", seed=1, name="pkg.fwsc"):
-        image = random_image(seed)          # the flash.bin (flash address 0 = image[0])
+        image = random_image(seed, 0x93000)  # the flash.bin (flash address 0 = image[0])
         path = self.tmp / name
         path.write_bytes(make_fwsc(identity, make_ufw(image)))
         return path, image
@@ -537,6 +539,235 @@ class RepairSettingsTests(Workdir):
         self.assertEqual(rc, 0, self.out.getvalue())
         self.assertIn("Retrying sector 0x93000 once", self.out.getvalue())
         self.assertIn("equals the expected image", self.out.getvalue())
+
+
+# --------------------------------------------------------------------------
+# full-restore
+# --------------------------------------------------------------------------
+
+def make_head(seed=1, boot_len=0x3000, cfg_len=0x200):
+    """A synthetic boot head with a valid JieLi flash header: uboot.boot and isd_config.ini."""
+    rnd = random.Random(seed)
+    head = bytearray(b"\xff" * fu.PROTECTED_END)
+    hdr = bytearray(rnd.randbytes(0x20))
+    struct.pack_into("<H", hdr, 0, fu._crc16(hdr[2:0x20]))
+    head[0:0x20] = fu._jl_enc(hdr)
+    boot_off, cfg_off = 0xA0, 0xA0 + boot_len
+    boot, cfg = rnd.randbytes(boot_len), rnd.randbytes(cfg_len)
+    head[boot_off:boot_off + boot_len] = boot
+    head[cfg_off:cfg_off + cfg_len] = cfg
+    for i, (name, off, data) in enumerate(((b"uboot.boot", boot_off, boot),
+                                           (b"isd_config.ini", cfg_off, cfg)), 1):
+        e = bytearray(0x20)
+        struct.pack_into("<HHIIBBH", e, 0, 0, fu._crc16(data), off, len(data), 0, 0, 0)
+        e[16:16 + len(name)] = name
+        struct.pack_into("<H", e, 0, fu._crc16(e[2:0x20]))
+        head[i * 0x20:(i + 1) * 0x20] = fu._jl_enc(e)
+    return bytes(head)
+
+
+class FullRestoreTests(Workdir):
+
+    def setUp(self):
+        super().setUp()
+        self.head = make_head(1)
+        p = mock.patch.dict(fu.KNOWN_HEADS, {hashlib.sha256(self.head).hexdigest():
+                                             "the stock V15 bootloader (sha256 verified)"})
+        p.start()
+        self.addCleanup(p.stop)
+        # the package: a stock head + firmware
+        self.image = self.head + random_image(5)[0x4000:0x93000]
+        self.pkg = self.tmp / "stock.fwsc"
+        self.pkg.write_bytes(make_fwsc("FM-1_920", make_ufw(self.image)))
+        # the unit: a replaced head (well-formed, but another one), old firmware, its data
+        self.unit = make_head(2, boot_len=0x3400) + random_image(6)[0x4000:0x93000] + \
+            random_image(7, fu.FLASH_SIZE - 0x93000)
+
+    def run_full(self, argv, dev):
+        return fu.main(["full-restore"] + argv, device=dev)
+
+    def test_package_rewrites_head_and_firmware_head_last(self):
+        dev, m = self.device(image=self.unit)
+        self.assertEqual(self.run_full([str(self.pkg), "--yes"], dev), 0, self.out.getvalue())
+        self.assertEqual(bytes(m.flash[:0x93000]), self.image[:0x93000])
+        self.assertEqual(bytes(m.flash[0x93000:]), self.unit[0x93000:])
+        erases = [op[1] for op in m.ops if op[0].startswith("erase")]
+        self.assertEqual({op[0] for op in m.ops}, {"erase_sector", "write"})
+        self.assertEqual(erases[-4:], [0x0, 0x1000, 0x2000, 0x3000])     # the head goes last
+        self.assertTrue(all(a >= 0x4000 for a in erases[:-4]))
+        (session,) = Path("backups").iterdir()
+        res = json.loads((session / "full-restore-result.json").read_text())
+        self.assertTrue(res["ok"])
+        self.assertEqual((session / "full-flash-before.bin").read_bytes(), self.unit)
+        text = self.out.getvalue()
+        self.assertIn("the stock V15 bootloader", text)
+        self.assertIn("equals the expected image byte for byte", text)
+
+    def test_only_head_differs(self):
+        unit = make_head(2) + self.image[0x4000:0x93000] + self.unit[0x93000:]
+        dev, m = self.device(image=unit)
+        self.assertEqual(self.run_full([str(self.pkg), "--yes"], dev), 0)
+        self.assertEqual({op[1] & ~0xFFF for op in m.ops}, {0x0, 0x1000, 0x2000, 0x3000})
+        self.assertEqual(bytes(m.flash[:0x4000]), self.head)
+
+    def test_other_head_needs_flag(self):
+        other = make_head(3) + self.image[0x4000:0x93000]
+        self.pkg.write_bytes(make_fwsc("FM-1_920", make_ufw(other)))
+        dev, m = self.device(image=self.unit)
+        self.assertEqual(self.run_full([str(self.pkg), "--yes"], dev), 1)
+        self.assertEqual((m.reads, m.ops), (0, []))
+        self.assertIn("--other-head", self.out.getvalue())
+        dev, m = self.device(image=self.unit)
+        self.assertEqual(self.run_full([str(self.pkg), "--yes", "--other-head"], dev), 0)
+        self.assertEqual(bytes(m.flash[:0x4000]), other[:0x4000])
+
+    def test_invalid_head_refused_without_override(self):
+        bad = bytearray(self.head)
+        bad[0x30A0 + 5] ^= 0xFF                         # inside isd_config.ini
+        cases = [bytes(bad), random_image(9, 0x4000), b"\xff" * 0x4000]
+        for head in cases:
+            self.pkg.write_bytes(make_fwsc("FM-1_920", make_ufw(head + self.image[0x4000:])))
+            dev, m = self.device(image=self.unit)
+            rc = self.run_full([str(self.pkg), "--yes", "--other-head", "--i-know"], dev)
+            self.assertEqual(rc, 1)
+            self.assertEqual((m.reads, m.ops), (0, []))
+        text = self.out.getvalue()
+        self.assertIn("isd_config.ini's data CRC fails", text)
+        self.assertIn("header CRC fails", text)
+        self.assertIn("is blank", text)
+
+    def test_image_keeps_unit_data_unless_asked(self):
+        backup = self.head + random_image(8)[0x4000:0x93000] + \
+            random_image(10, fu.FLASH_SIZE - 0x93000)
+        Path("backup.bin").write_bytes(backup)
+        dev, m = self.device(image=self.unit)
+        self.assertEqual(self.run_full(["--image", "backup.bin", "--yes"], dev), 0,
+                         self.out.getvalue())
+        expected = bytearray(backup)
+        expected[0xE9000:0xEA000] = self.unit[0xE9000:0xEA000]
+        expected[0xFF000:] = self.unit[0xFF000:]
+        self.assertEqual(bytes(m.flash), bytes(expected))
+        self.assertFalse([op for op in m.ops
+                          if 0xE9000 <= op[1] < 0xEA000 or op[1] >= 0xFF000])
+        self.assertIn("kept as on the unit: this unit's Bluetooth data", self.out.getvalue())
+        dev, m = self.device(image=self.unit)
+        self.assertEqual(self.run_full(["--image", "backup.bin", "--yes",
+                                        "--include-unit-data"], dev), 0)
+        self.assertEqual(bytes(m.flash), backup)
+
+    def test_image_refusals(self):
+        good = self.head + random_image(8)[0x4000:0x93000] + b"\xff" * (fu.FLASH_SIZE - 0x93000)
+        torn = bytearray(good)
+        torn[0x20800:0x21000] = b"\xff" * 0x800
+        cases = {"short.bin": good[:0x80000], "torn.bin": bytes(torn),
+                 "blank.bin": good[:0x4000] + b"\xff" * (fu.FLASH_SIZE - 0x4000)}
+        for name, data in cases.items():
+            Path(name).write_bytes(data)
+            dev, m = self.device(image=self.unit)
+            self.assertEqual(self.run_full(["--image", name, "--yes"], dev), 1, name)
+            self.assertEqual((m.reads, m.ops), (0, []))
+        Path("good.bin").write_bytes(good)
+        dev, m = self.device(image=self.unit)
+        self.assertEqual(self.run_full(["--image", "good.bin", "--yes", "--verify-v15"], dev), 1)
+        self.assertEqual(self.run_full([str(self.pkg), "--image", "good.bin", "--yes"], dev), 1)
+        self.assertEqual(self.run_full(["--yes"], dev), 1)
+        self.assertEqual((m.reads, m.ops), (0, []))
+        text = self.out.getvalue()
+        self.assertIn("exactly 0x100000", text)
+        self.assertIn("torn firmware sectors 0x20000", text)
+        self.assertIn("is blank; refusing", text)
+        self.assertIn("either a package (.fwsc) or --image", text)
+
+    def test_confirmation_plan_only_and_nothing_to_do(self):
+        dev, m = self.device(image=self.unit)
+        with mock.patch.object(fu, "stdin_is_tty", return_value=True), \
+                mock.patch.object(fu, "ask", return_value="WRITE"):
+            self.assertEqual(self.run_full([str(self.pkg)], dev), 1)
+        self.assertEqual(m.ops, [])
+        dev, m = self.device(image=self.unit)
+        self.assertEqual(self.run_full([str(self.pkg), "--plan-only"], dev), 0)
+        self.assertEqual(m.ops, [])
+        self.assertIn("PLAN ONLY", self.out.getvalue())
+        dev, m = self.device(image=self.unit)
+        with mock.patch.object(fu, "stdin_is_tty", return_value=True), \
+                mock.patch.object(fu, "ask", return_value="FULL"):
+            self.assertEqual(self.run_full([str(self.pkg)], dev), 0)
+        dev, m = self.device(image=bytes(m.flash))
+        self.assertEqual(self.run_full([str(self.pkg), "--yes"], dev), 0)
+        self.assertEqual(m.ops, [])
+        self.assertIn("nothing to write", self.out.getvalue())
+
+    def test_flaky_write_retried_and_dead_cell_is_exit_3(self):
+        Path("unit.bin").write_bytes(self.unit)
+        rc = fu.main(["full-restore", str(self.pkg), "--yes", "--dry-run", "--mock-image",
+                      "unit.bin", "--mock-flaky", "write"])
+        self.assertEqual(rc, 0, self.out.getvalue())
+        self.assertIn("Retrying sector", self.out.getvalue())
+        rc = fu.main(["full-restore", str(self.pkg), "--yes", "--dry-run", "--mock-image",
+                      "unit.bin", "--mock-flaky", "write-always"])
+        self.assertEqual(rc, fu.EXIT_DANGER)
+        self.assertIn("Do NOT power off", self.out.getvalue())
+
+    def v16_like(self, name="v16.fwsc"):
+        """A package shaped like V16: firmware up to 0xA8FFF."""
+        image = self.head + random_image(21, 0xA9000 - 0x4000)
+        path = self.tmp / name
+        path.write_bytes(make_fwsc("FM-1_016", make_ufw(image)))
+        return path, image
+
+    def test_long_package_refused_by_restore_and_extract(self):
+        path, _ = self.v16_like()
+        dev, m = self.device(image=self.unit)
+        self.assertEqual(fu.main(["restore", str(path), "--yes"], device=dev), 1)
+        self.assertEqual(fu.main(["restore", str(path), "--yes", "--i-know"], device=dev), 1)
+        self.assertEqual(fu.main(["extract", str(path), "out.bin"]), 1)
+        self.assertEqual((m.reads, m.ops), (0, []))
+        self.assertFalse(Path("out.bin").exists())
+        self.assertIn("past 0x92FFF", self.out.getvalue())
+        self.assertIn("full-restore v16.fwsc", self.out.getvalue())
+
+    def test_full_restore_writes_a_long_package_completely(self):
+        path, image = self.v16_like()
+        dev, m = self.device(image=self.unit)
+        self.assertEqual(self.run_full([str(path), "--yes"], dev), 0, self.out.getvalue())
+        self.assertEqual(bytes(m.flash[:0xA9000]), image)
+        self.assertEqual(bytes(m.flash[0xA9000:]), self.unit[0xA9000:])
+
+    def test_gate(self):
+        for addr, length in ((0x800, 0x1000), (0x0, 0x800), (0xFF000, 0x2000)):
+            with self.assertRaises(fu.SafetyError):
+                fu._check_full(addr, length, False)
+        for addr in (0xE9000, 0xFF000):
+            with self.assertRaises(fu.SafetyError):
+                fu._check_full(addr, 0x1000, True)
+            fu._check_full(addr, 0x1000, False)
+        fu._check_full(0x0, 0x1000, True)
+        with self.assertRaises(fu.SafetyError):     # the other commands still refuse the head
+            fu._check_mutable(0x0, 0x1000)
+
+    def test_real_v16(self):
+        if not V16_FWSC.is_file():
+            self.skipTest("no official V16 package")
+        mock.patch.stopall()
+        pkg = fu.Package.load(V16_FWSC)
+        self.assertEqual((pkg.kind, pkg.end), ("official-v16", 0xA9000))
+        self.assertEqual(pkg.file_sha256, fu.V16_FILE_SHA256)
+        self.assertEqual(fu.describe_head(pkg.head), "the stock V16 bootloader (sha256 verified)")
+        self.assertEqual(fu.sha256(pkg.flash[0x4000:0x93000]), fu.V16_REGION_SHA256)
+        with self.assertRaises(fu.SafetyError):
+            pkg.check_fits_firmware_region()
+
+    def test_real_v15_head(self):
+        path = V15_FWSC if V15_FWSC.is_file() else ROOT / "FM-1.fwsc"
+        if not path.is_file():
+            self.skipTest("no official V15 package")
+        mock.patch.stopall()
+        pkg = fu.Package.load(path)
+        if pkg.kind != "official-v15":
+            self.skipTest("not the official V15")
+        names = [f["name"] for f in fu.parse_head(pkg.head)]
+        self.assertEqual(names[:2], ["uboot.boot", "isd_config.ini"])
+        self.assertEqual(hashlib.sha256(pkg.head).hexdigest(), fu.V15_HEAD_SHA256)
 
 
 # --------------------------------------------------------------------------

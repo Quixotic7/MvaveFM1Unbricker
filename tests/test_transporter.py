@@ -316,11 +316,121 @@ class EndToEndTests(Base):
         self.assertEqual(rc, 1)
         self.assertEqual(m.reads, 0)
 
+    def test_long_package_refused(self):
+        image = self.image[:0x93000] + random_image(22, 0xA9000 - 0x93000)
+        Path("v16.fwsc").write_bytes(make_fwsc("FM-1_016", make_ufw(image)))
+        Path("ref.bin").write_bytes(self.before)
+        t, m = self.transporter(flash=self.before)
+        rc = self.run_main(["restore", "v16.fwsc", "--ref", "ref.bin", "--write", "--yes"], t)
+        self.assertEqual(rc, 1)
+        self.assertEqual((m.reads, m.writes), (0, []))
+        self.assertIn("the Transporter (its firmware refuses anything past 0x92FFF)",
+                      self.out.getvalue())
+
     def test_ref_must_be_full_dump(self):
         Path("ref.bin").write_bytes(self.before[:0x80000])
         t, m = self.transporter(flash=self.before)
         self.assertEqual(self.run_main(["restore", str(self.path), "--ref", "ref.bin"], t), 1)
         self.assertEqual(m.reads, 0)
+
+
+# --------------------------------------------------------------------------
+# restore / recover from a full flash image (--image)
+# --------------------------------------------------------------------------
+
+class ImageRestoreTests(Base):
+
+    def setUp(self):
+        super().setUp()
+        head = random_image(7, 0x4000)
+        self.factory = flash_from(head, random_image(11)[0x4000:0x93000], data_area())
+        # the unit: same head, a broken app, changed device data
+        self.unit = flash_from(head, random_image(12)[0x4000:0x93000],
+                               data_area(with_loader=False))
+        Path("factory.bin").write_bytes(self.factory)
+        Path("ref.bin").write_bytes(self.unit)
+        self.expected = self.unit[:0x4000] + self.factory[0x4000:0x93000] + self.unit[0x93000:]
+
+    def test_restore_from_image(self):
+        t, m = self.transporter(flash=self.unit)
+        argv = ["restore", "--image", "factory.bin", "--ref", "ref.bin"]
+        self.assertEqual(self.run_main(argv, t), 0)                 # dry run
+        self.assertEqual(m.writes, [])
+        self.assertEqual(self.run_main(argv + ["--write", "--yes"], t), 0)
+        self.assertEqual(bytes(m.flash), self.expected)
+        self.assertEqual(m.lowest_written(), 0x4000)
+        self.assertTrue(all(x < 0x93000 for x in m.writes))
+        text = self.out.getvalue()
+        self.assertIn("Image flash image", text)
+        self.assertIn("device data 0x93000..0xFFFFF differs from the unit's", text)
+        self.assertIn("repair-settings --factory factory.bin", text)
+        self.assertIn("Final full read EQUALS the expected image", text)
+
+    def test_recover_from_image(self):
+        t, m = self.transporter(flash=self.unit)
+        rc = self.run_main(["recover", "--image", "factory.bin", "--out", "rec", "--yes"], t)
+        self.assertEqual(rc, 0)
+        self.assertEqual(bytes(m.flash), self.expected)
+
+    def test_image_with_other_head_refused(self):
+        other = flash_from(random_image(8, 0x4000), self.factory[0x4000:0x93000], data_area())
+        Path("other.bin").write_bytes(other)
+        t, m = self.transporter(flash=self.unit)
+        rc = self.run_main(["restore", "--image", "other.bin", "--ref", "ref.bin",
+                            "--write", "--yes"], t)
+        self.assertEqual(rc, 1)
+        self.assertEqual(m.reads, 0)
+        self.assertEqual(m.writes, [])
+        self.assertIn("may not fit this unit's boot head", self.out.getvalue())
+
+    def test_image_with_v15_app_and_other_head_writes_app_only(self):
+        other_head = random_image(8, 0x4000)
+        img = flash_from(other_head, self.factory[0x4000:0x93000], data_area())
+        Path("v15ish.bin").write_bytes(img)
+        t, m = self.transporter(flash=self.unit)
+        with mock.patch.object(fu, "V15_FLASH_FW_SHA256",
+                               fu.sha256(self.factory[0x4000:0x93000])):
+            rc = self.run_main(["restore", "--image", "v15ish.bin", "--ref", "ref.bin",
+                                "--write", "--yes", "--verify-v15"], t)
+        self.assertEqual(rc, 0)
+        self.assertIn("NEVER written", self.out.getvalue())
+        self.assertEqual(bytes(m.flash), self.expected)            # head untouched
+
+    def test_v16_backup_refused(self):
+        t, m = self.transporter(flash=self.unit)
+        with mock.patch.object(fu, "V16_REGION_SHA256", fu.sha256(self.factory[0x4000:0x93000])):
+            rc = self.run_main(["restore", "--image", "factory.bin", "--ref", "ref.bin"], t)
+        self.assertEqual(rc, 1)
+        self.assertEqual((m.reads, m.writes), (0, []))
+        self.assertIn("holds the official V16", self.out.getvalue())
+
+    def test_image_refusals(self):
+        t, m = self.transporter(flash=self.unit)
+        cases = {
+            "short.bin": self.factory[:0x80000],
+            "blank.bin": self.factory[:0x4000] + b"\xff" * 0x8F000 + self.factory[0x93000:],
+        }
+        torn = bytearray(self.factory)
+        torn[0x20800:0x21000] = b"\xff" * 0x800                    # stops on a page boundary
+        cases["torn.bin"] = bytes(torn)
+        for name, data in cases.items():
+            Path(name).write_bytes(data)
+            rc = self.run_main(["restore", "--image", name, "--ref", "ref.bin", "--write",
+                                "--yes"], t)
+            self.assertEqual(rc, 1, name)
+        text = self.out.getvalue()
+        self.assertIn("a full flash image is exactly 0x100000", text)
+        self.assertIn("is blank; refusing", text)
+        self.assertIn("torn application sectors 0x20000", text)
+        # --verify-v15 refuses a non-V15 image, a package and --image together are refused
+        self.assertEqual(self.run_main(["restore", "--image", "factory.bin", "--ref", "ref.bin",
+                                        "--verify-v15"], t), 1)
+        path, _ = self.pkg("p.fwsc", 1)
+        self.assertEqual(self.run_main(["restore", str(path), "--image", "factory.bin",
+                                        "--ref", "ref.bin"], t), 1)
+        self.assertIn("not both", self.out.getvalue())
+        self.assertEqual(m.reads, 0)
+        self.assertEqual(m.writes, [])
 
 
 # --------------------------------------------------------------------------
