@@ -1,5 +1,6 @@
 **New to this? Start with the illustrated guide: <https://quixotic7.github.io/MvaveFM1Unbricker/>**
 (why FM-1s get bricked, a "find my fix" wizard, and step-by-step instructions in plain language).
+
 Another easy guide: https://github.com/GoodPerson42/FM1-Unbricking-For-Dummies
 
 # Recover from firmware lock
