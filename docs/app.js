@@ -552,10 +552,10 @@
       ["🔁", "I installed a different bootloader / used M-Flasher", "Or another tool that changes the start-up part", "os:head"],
       ["🤷", "I don't know", "We'll start with the most common fix", "os:update"]
     ] },
-    os: { q: "Which computer can you use for the fix?", help: "Any computer works for checking; the fix itself needs one of these.", opts: [
+    os: { q: "Which computer will you use for the fix?", opts: [
       ["🪟", "Windows", "Windows 10 or 11", "pick:win"],
       ["🐧", "Linux or a Raspberry Pi", "", "pick:linux"],
-      ["🍎", "Only a Mac", "", "pick:mac"]
+      ["🍎", "A Mac", "macOS 11 or newer", "pick:mac"]
     ] }
   };
 
@@ -566,18 +566,11 @@
         '<p>If it finishes with <strong>Done</strong> but the screen is still black, the bootloader is the problem: then do the <a href="#guides" data-goto="starter" data-os-set="' + os + '">Bootloader fix</a>.</p>',
         go: "usb", os: os };
     },
-    usb_mac: { tag: "Two options", title: "USB fix on a borrowed computer, or the Transporter", body:
-      "<p>The usual fix (the USB fix) can't run on a Mac. You can:</p><ul>" +
-      '<li><strong>Borrow a Windows PC</strong> (or use a Raspberry Pi) for 15 minutes and do the <a href="#guides" data-goto="usb" data-os-set="win">USB fix</a>. Easiest.</li>' +
-      '<li>Or use the <a href="#guides" data-goto="transporter" data-os-set="mac">Transporter</a> with your Mac: two small parts (about $15), no soldering.</li></ul>' },
     head: function (os) {
       return { tag: "Your fix", title: "The Bootloader fix", body:
         "<p>The start-up part of the memory (the “bootloader”) was replaced and doesn't start your FM-1. The Bootloader fix puts the stock one back, along with the official firmware, and keeps your settings.</p>",
         go: "starter", os: os };
     },
-    head_mac: { tag: "Needs a PC", title: "Bootloader fix on a borrowed computer", body:
-      "<p>Putting the bootloader back needs a <strong>Windows PC or a Raspberry Pi</strong>: neither the USB tool nor the Transporter can do it from a Mac. Borrow one for 15 minutes and follow the <a href=\"#guides\" data-goto=\"starter\" data-os-set=\"win\">Bootloader fix</a>.</p>" +
-      "<p>If you used M-Flasher, it runs on a Mac and has its own options to restore a backup or put the stock bootloader back; that's also worth a try.</p>" },
     r_transporter: { tag: "Your fix", title: "The Transporter route", body:
       "<p>When nothing shows up at all, the rescue mode needs a knock from the outside. A small board, the FM-1 Transporter, does exactly that. Two parts (about $15), no soldering, and it works with a Mac, Windows or Linux.</p>",
       go: "transporter" },
@@ -624,8 +617,8 @@
     if (to.indexOf("os:") === 0) { cause = to.slice(3); renderNode("os"); return; }
     if (to.indexOf("pick:") === 0) {
       var os = to.slice(5);
-      if (cause === "head") renderResult(os === "mac" ? RESULTS.head_mac : RESULTS.head(os));
-      else renderResult(os === "mac" ? RESULTS.usb_mac : RESULTS.usb(os));
+      if (cause === "head") renderResult(RESULTS.head(os));
+      else renderResult(RESULTS.usb(os));
       return;
     }
     if (W[to]) { renderNode(to); return; }

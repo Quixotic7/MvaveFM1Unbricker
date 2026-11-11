@@ -161,7 +161,7 @@
       </div>
       <div class="card">
         <h3>Want V16? Install it once it works</h3>
-        <p>Once your FM-1 starts again, update to V16 with <a href="https://www.m-vave.com/download" target="_blank" rel="noopener">M-VAVE's own updater</a>, on a full battery. Or put V16 on directly with the <a href="#guides" data-goto="starter">Bootloader fix</a> (Windows or Linux), which writes all of it, its own bootloader included.</p>
+        <p>Once your FM-1 starts again, update to V16 with <a href="https://www.m-vave.com/download" target="_blank" rel="noopener">M-VAVE's own updater</a>, on a full battery. Or put V16 on directly with the <a href="#guides" data-goto="starter">Bootloader fix</a>, which writes all of it, its own bootloader included.</p>
         <p><small>The normal USB fix and the Transporter refuse V16: they can only write as far as V15's firmware goes, and half a firmware would not start.</small></p>
       </div>
       <div class="card">
@@ -206,10 +206,11 @@
       <div class="guide-head">
         <div>
           <h3>USB fix: put the firmware back</h3>
-          <div class="meta"><span class="pill">About 15 minutes</span><span class="pill">No extra parts</span><span class="pill">Windows or Linux</span></div>
+          <div class="meta"><span class="pill">About 15 minutes</span><span class="pill">No extra parts</span><span class="pill">Windows, Mac or Linux</span></div>
         </div>
         <div class="seg" role="group" aria-label="Your computer">
           <button type="button" data-os-pick="win" aria-pressed="true">Windows</button>
+          <button type="button" data-os-pick="mac" aria-pressed="false">Mac</button>
           <button type="button" data-os-pick="linux" aria-pressed="false">Linux / Raspberry Pi</button>
         </div>
       </div>
@@ -222,14 +223,20 @@
             <li>The FM-1, <strong>charged</strong>.</li>
             <li>A USB cable that carries <strong>data</strong>. Some cables only charge; if nothing shows up later, try another cable.</li>
             <li class="os-only os-win">A Windows 10 or 11 computer.</li>
+            <li class="os-only os-mac">A Mac with macOS 11 or newer (Apple silicon or Intel), and your Mac password.</li>
             <li class="os-only os-linux">A Linux computer or a Raspberry Pi.</li>
             <li>An internet connection (only for the setup).</li>
           </ul>
-          <div class="callout tip"><span class="ico">i</span><p>Only have a Mac? This step can't run on macOS. Borrow any Windows PC, or use a Raspberry Pi. There's also a route that works on a Mac, with a small extra board: see <a href="#guides" data-goto="transporter">Dark, no USB at all</a>.</p></div>
         </li>
         <li class="os-only os-win">
           <h4>Install Python (free)</h4>
           <p>Python is the program that runs the rescue tool. Download it from <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org/downloads</a> and run the installer. On the first screen, tick <strong>"Add python.exe to PATH"</strong>, then click <strong>Install Now</strong>.</p>
+        </li>
+        <li class="os-only os-mac">
+          <h4>Check that Python is there</h4>
+          <p>Open the <strong>Terminal</strong> app (Applications → Utilities) and type:</p>
+          <div class="code"><pre>python3 --version</pre></div>
+          <p>Anything from <code class="inline">Python 3.9</code> up is fine. If your Mac offers to install the "command line developer tools" instead, click <strong>Install</strong>, wait, and try again. Or install Python from <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org</a>.</p>
         </li>
         <li class="os-only os-linux">
           <h4>Check that Python is there</h4>
@@ -241,6 +248,7 @@
           <h4>Download the rescue tool</h4>
           <p><a class="btn btn-ghost btn-small" href="https://github.com/Quixotic7/MvaveFM1Unbricker/archive/refs/heads/main.zip">⬇ Download the tool (ZIP)</a></p>
           <p class="os-only os-win">Open your Downloads folder, right-click <strong>MvaveFM1Unbricker-main.zip</strong>, choose <strong>Extract All…</strong>, then <strong>Extract</strong>. You now have a folder with a file called <code class="inline">fm1_unbrick.py</code> inside.</p>
+          <p class="os-only os-mac">Your Mac unzips it in Downloads by itself (if not, double-click it). You now have a folder <code class="inline">MvaveFM1Unbricker-main</code> with <code class="inline">fm1_unbrick.py</code> inside.</p>
           <p class="os-only os-linux">Unzip it in your Downloads folder (double-click it, or <code class="inline">unzip MvaveFM1Unbricker-main.zip</code>). You now have a folder <code class="inline">MvaveFM1Unbricker-main</code> with <code class="inline">fm1_unbrick.py</code> inside.</p>
         </li>
         <li>
@@ -255,16 +263,20 @@
           <h4>Connect the FM&#8209;1</h4>
           <p>Switch the FM-1 on (the screen stays black, that's expected) and plug it <strong>straight into the computer</strong>, not through a USB hub or dock.</p>
           <div class="callout danger os-only os-win"><span class="ico">!</span><p><strong>If Windows asks to format a disk, click Cancel.</strong> That "disk" is the FM-1's rescue mode. Never format it.</p></div>
+          <div class="callout danger os-only os-mac"><span class="ico">!</span><p><strong>If your Mac says the disk is not readable, click Ignore</strong>, never Initialize. That "disk" is the FM-1's rescue mode.</p></div>
         </li>
         <li>
           <h4 class="os-only os-win">Open PowerShell as administrator</h4>
           <h4 class="os-only os-linux">Open a terminal</h4>
+          <h4 class="os-only os-mac">Open Terminal</h4>
           <p class="os-only os-win">Right-click the <strong>Start</strong> button and choose <strong>Terminal (Admin)</strong> or <strong>Windows PowerShell (Admin)</strong>. Click <strong>Yes</strong> when Windows asks. "Admin" matters: the tool needs it to talk to the FM-1.</p>
           <p class="os-only os-linux">Open the Terminal app. You'll type a few commands; the tool will ask for your password when it needs it.</p>
+          <p class="os-only os-mac">Open the <strong>Terminal</strong> app. You'll type a few commands; when one asks for your <strong>Password</strong>, type your Mac password (nothing shows while you type, that's normal) and press <kbd>Enter</kbd>.</p>
           <p>Then go into the tool's folder. Copy this, paste it in the window and press <kbd>Enter</kbd>:</p>
           <div class="code os-only os-win"><pre>cd "$HOME\Downloads\MvaveFM1Unbricker-main\MvaveFM1Unbricker-main"</pre></div>
           <div class="code os-only os-linux"><pre>cd ~/Downloads/MvaveFM1Unbricker-main</pre></div>
-          <div class="callout tip"><span class="ico">i</span><p class="os-only os-win">"Cannot find path"? Your folder is somewhere else. Open the folder that contains <code class="inline">fm1_unbrick.py</code> in File Explorer, click its address bar, copy it, and type <code class="inline">cd "</code>, paste, <code class="inline">"</code>, <kbd>Enter</kbd>.</p><p class="os-only os-linux">"No such file or directory"? Type <code class="inline">cd </code> (with a space), drag the folder that contains <code class="inline">fm1_unbrick.py</code> into the terminal window, and press <kbd>Enter</kbd>.</p></div>
+          <div class="code os-only os-mac"><pre>cd ~/Downloads/MvaveFM1Unbricker-main</pre></div>
+          <div class="callout tip"><span class="ico">i</span><p class="os-only os-win">"Cannot find path"? Your folder is somewhere else. Open the folder that contains <code class="inline">fm1_unbrick.py</code> in File Explorer, click its address bar, copy it, and type <code class="inline">cd "</code>, paste, <code class="inline">"</code>, <kbd>Enter</kbd>.</p><p class="os-only os-linux os-mac">"No such file or directory"? Type <code class="inline">cd </code> (with a space), drag the folder that contains <code class="inline">fm1_unbrick.py</code> into the terminal window, and press <kbd>Enter</kbd>.</p></div>
         </li>
         <li>
           <h4>Set up the tool (once)</h4>
@@ -272,12 +284,17 @@
           <div class="code os-only os-win"><pre>py fm1_unbrick.py setup</pre></div>
           <div class="code os-only os-linux"><pre>python3 -m venv .venv
 .venv/bin/python fm1_unbrick.py setup</pre></div>
+          <div class="code os-only os-mac"><pre>python3 -m venv .venv
+.venv/bin/python fm1_unbrick.py setup</pre></div>
         </li>
         <li>
           <h4>Run the fix</h4>
           <div class="code os-only os-win"><pre>py fm1_unbrick.py restore V15-FM-1.fwsc</pre></div>
           <div class="code os-only os-linux"><pre>sudo modprobe sg
 sudo .venv/bin/python fm1_unbrick.py restore V15-FM-1.fwsc</pre></div>
+          <div class="code os-only os-mac"><pre>sudo .venv/bin/python fm1_unbrick.py restore V15-FM-1.fwsc</pre></div>
+          <div class="callout warn os-only os-mac"><span class="ico">!</span><p><strong>On a Mac, be quick.</strong> macOS lets the FM-1 slip out of rescue mode after about half a minute, so run this soon after plugging it in. If your FM-1 still starts a firmware (it isn't dark), this one line asks for your password first, then sends it into rescue mode and starts the fix at once:</p></div>
+          <div class="code os-only os-mac"><pre>sudo -v && .venv/bin/python fm1_unbrick.py softkey --yes && sudo .venv/bin/python fm1_unbrick.py restore V15-FM-1.fwsc</pre></div>
           <p>The tool checks it's talking to an FM-1, then reads the whole memory <strong>twice</strong> and saves a backup in the <code class="inline">backups</code> folder. Then it shows what it's about to do and asks you to confirm:</p>
           <div class="screen-sample"><span class="label">What you'll see (shortened)</span>Backup OK   backups/fm1-recovery-…/full-flash-before.bin
 About to WRITE the FM-1 flash:
@@ -306,10 +323,11 @@ About to WRITE the FM-1 flash:
       <div class="guide-head">
         <div>
           <h3>Bootloader fix: put everything back, bootloader included</h3>
-          <div class="meta"><span class="pill">About 15 minutes</span><span class="pill">No extra parts</span><span class="pill">Windows or Linux</span></div>
+          <div class="meta"><span class="pill">About 15 minutes</span><span class="pill">No extra parts</span><span class="pill">Windows, Mac or Linux</span></div>
         </div>
         <div class="seg" role="group" aria-label="Your computer">
           <button type="button" data-os-pick="win" aria-pressed="true">Windows</button>
+          <button type="button" data-os-pick="mac" aria-pressed="false">Mac</button>
           <button type="button" data-os-pick="linux" aria-pressed="false">Linux / Raspberry Pi</button>
         </div>
       </div>
@@ -327,12 +345,14 @@ About to WRITE the FM-1 flash:
           <p>This makes a backup and shows what would change, then stops:</p>
           <div class="code os-only os-win"><pre>py fm1_unbrick.py full-restore V15-FM-1.fwsc --plan-only</pre></div>
           <div class="code os-only os-linux"><pre>sudo .venv/bin/python fm1_unbrick.py full-restore V15-FM-1.fwsc --plan-only</pre></div>
+          <div class="code os-only os-mac"><pre>sudo .venv/bin/python fm1_unbrick.py full-restore V15-FM-1.fwsc --plan-only</pre></div>
           <p>Look for the line about the bootloader ("boot head on the unit now"). If it says it's <em>not</em> the stock one, this fix is for you.</p>
         </li>
         <li>
           <h4>Run the full fix</h4>
           <div class="code os-only os-win"><pre>py fm1_unbrick.py full-restore V15-FM-1.fwsc</pre></div>
           <div class="code os-only os-linux"><pre>sudo .venv/bin/python fm1_unbrick.py full-restore V15-FM-1.fwsc</pre></div>
+          <div class="code os-only os-mac"><pre>sudo .venv/bin/python fm1_unbrick.py full-restore V15-FM-1.fwsc</pre></div>
           <p>It puts back the stock bootloader and the stock firmware. Your settings and sounds stay as they are. Type <kbd>FULL</kbd> when asked. It writes the bootloader <strong>last</strong> and checks every byte.</p>
           <p><small>Using V16 instead? <a href="https://github.com/Quixotic7/FM1Backups/raw/main/V16-FM-1.fwsc">Download V16-FM-1.fwsc</a> (or get it from <a href="https://www.m-vave.com/download" target="_blank" rel="noopener">M-VAVE</a>), put it in the folder and use its name in place of <code class="inline">V15-FM-1.fwsc</code>. The tool recognises the genuine V16 and its bootloader by their fingerprints too.</small></p>
           <div class="callout danger"><span class="ico">!</span><p>Keep the FM-1 plugged in until it says Done. If it's interrupted while writing the bootloader, the FM-1 won't start until you run the same command again.</p></div>
@@ -346,6 +366,7 @@ About to WRITE the FM-1 flash:
           <p>If you have a full 1 MB backup of your FM-1 from before the problem (M-Flasher and this tool both make one), the fix can put back <em>everything</em> from it, factory sounds included:</p>
           <div class="code os-only os-win"><pre>py fm1_unbrick.py full-restore --image my-backup.bin</pre></div>
           <div class="code os-only os-linux"><pre>sudo .venv/bin/python fm1_unbrick.py full-restore --image my-backup.bin</pre></div>
+          <div class="code os-only os-mac"><pre>sudo .venv/bin/python fm1_unbrick.py full-restore --image my-backup.bin</pre></div>
           <p>Replace <code class="inline">my-backup.bin</code> with your file's name. Your FM-1's own Bluetooth identity is kept unless you add <code class="inline">--include-unit-data</code> (only do that with a backup of this same FM-1).</p>
           <p><small>If the tool says the bootloader in your file "is not the stock V15 or V16 bootloader" and you know it's the right one (for example m-bootloader, from your own backup), add <code class="inline">--other-head</code>.</small></p>
         </li>
@@ -364,7 +385,7 @@ About to WRITE the FM-1 flash:
           <button type="button" data-os-pick="win" aria-pressed="false">Windows</button>
         </div>
       </div>
-      <p>For an FM-1 that shows <strong>nothing</strong> on the computer, in any mode, with any cable. A tiny board (the <a href="https://github.com/kurogedelic/FM-1-transporter" target="_blank" rel="noopener">FM-1 Transporter</a>, by Leo Kuroshita) knocks on the chip's rescue mode from the outside. No soldering. This route also works if you only have a Mac.</p>
+      <p>For an FM-1 that shows <strong>nothing</strong> on the computer, in any mode, with any cable. A tiny board (the <a href="https://github.com/kurogedelic/FM-1-transporter" target="_blank" rel="noopener">FM-1 Transporter</a>, by Leo Kuroshita) knocks on the chip's rescue mode from the outside. No soldering. It works with a Mac, Windows or Linux.</p>
       <div class="callout tip"><span class="ico">i</span><p>The Transporter puts the firmware back. It can't rewrite the <button class="term" data-term="starter">bootloader</button>: if that's your problem, see the <a href="#guides" data-goto="starter">Bootloader fix</a>.</p></div>
       <div class="progress-line"><div></div></div>
       <ol class="steps">
@@ -457,7 +478,7 @@ About to WRITE the FM-1 flash:
           <h4>Have a backup from before? Put everything back</h4>
           <p>The cleanest fix: if you (or M-Flasher, or this tool) made a full backup of this FM-1 while it was fine, restore it. That brings back the firmware it had then, its presets, sounds, fonts and settings, exactly. It's the <a href="#guides" data-goto="starter">Bootloader fix</a> with your backup file:</p>
           <div class="code"><pre>py fm1_unbrick.py full-restore --image my-backup.bin --include-unit-data</pre></div>
-          <p><small>Windows, in an administrator terminal; on Linux use <code class="inline">sudo .venv/bin/python</code> instead of <code class="inline">py</code>. Only use <code class="inline">--include-unit-data</code> with a backup of <em>this</em> FM-1.</small></p>
+          <p><small>Windows, in an administrator terminal; on a Mac or Linux use <code class="inline">sudo .venv/bin/python</code> instead of <code class="inline">py</code>. Only use <code class="inline">--include-unit-data</code> with a backup of <em>this</em> FM-1.</small></p>
         </li>
         <li>
           <h4>No backup of your own? Use a factory one</h4>
@@ -467,13 +488,13 @@ About to WRITE the FM-1 flash:
         </li>
         <li>
           <h4>Settings leftovers only? Reset the settings area</h4>
-          <p>If presets are scrambled on V15 but sounds and fonts are fine, the tool can put just the settings area back to factory state. It needs a backup of a factory-fresh FM-1: use <a href="https://github.com/Quixotic7/FM1Backups/raw/main/new-unit-factory-20261017/fm1-factory-settings-only.bin">this factory settings file</a> (from a new FM-1, read before anything was installed on it), and a Windows or Linux computer.</p>
+          <p>If presets are scrambled on V15 but sounds and fonts are fine, the tool can put just the settings area back to factory state. It needs a backup of a factory-fresh FM-1: use <a href="https://github.com/Quixotic7/FM1Backups/raw/main/new-unit-factory-20261017/fm1-factory-settings-only.bin">this factory settings file</a> (from a new FM-1, read before anything was installed on it).</p>
           <p>With the FM-1 on its normal screen, this switches it into rescue mode (works on a Mac too):</p>
           <div class="code"><pre>py fm1_unbrick.py softkey</pre></div>
           <p>Then, in an administrator terminal (see the USB fix):</p>
           <div class="code"><pre>py fm1_unbrick.py repair-settings --factory fm1-factory-settings-only.bin</pre></div>
           <p>Type <kbd>REPAIR</kbd> when asked. It only touches the settings areas, and your backup keeps everything it removes. Then unplug, switch off, wait 5 seconds, switch on, and do <strong>System → Reset Patches</strong> once more.</p>
-          <p><small>On a Mac, run the first command as <code class="inline">python3 fm1_unbrick.py softkey</code> (after <code class="inline">python3 fm1_unbrick.py setup</code>), then move the cable to the Windows or Linux computer: the FM-1 stays in rescue mode while it's on. On Linux, use <code class="inline">sudo .venv/bin/python</code> instead of <code class="inline">py</code>.</small></p>
+          <p><small>On a Mac or Linux, in Terminal, run it all in one go: <code class="inline">sudo -v &amp;&amp; .venv/bin/python fm1_unbrick.py softkey --yes &amp;&amp; sudo .venv/bin/python fm1_unbrick.py repair-settings --factory fm1-factory-settings-only.bin</code></small></p>
         </li>
       </ol>
     </article>
@@ -515,7 +536,7 @@ About to WRITE the FM-1 flash:
         </li>
         <li>
           <h4>Put the official firmware back</h4>
-          <p>Now follow the <a href="#guides" data-goto="usb">USB fix</a> from its step 1, with <a href="https://github.com/Quixotic7/FM1Backups/raw/main/V15-FM-1.fwsc">V15</a>. It needs a Windows or Linux computer: on a Mac, move the cable over while the FM-1 stays on (it stays in rescue mode until switched off), or use the Transporter.</p>
+          <p>Now follow the <a href="#guides" data-goto="usb">USB fix</a> from its step 1, with <a href="https://github.com/Quixotic7/FM1Backups/raw/main/V15-FM-1.fwsc">V15</a>. It works on Windows, Mac and Linux. On a Mac, start the fix within about half a minute of the FM-1 entering rescue mode: the USB fix has a one-line command for that.</p>
         </li>
         <li>
           <h4>Next time: check before you install</h4>
@@ -591,7 +612,7 @@ About to WRITE the FM-1 flash:
     <details><summary>Could this make things worse?</summary><div><p>It's designed not to. It makes a full backup first, checks that it's an FM-1, checks the firmware file, and verifies everything it writes. The rescue mode itself can't be damaged by any of this, so you can always try again.</p></div></details>
     <details><summary>Will I lose my songs and settings?</summary><div><p>The normal fix only rewrites the firmware, not your settings. And the backup it makes before writing holds everything, songs and sounds included. Keep the <code class="inline">backups</code> folder. (If you used Felucca or ChoralRoot, the official firmware may later overwrite the area where they kept projects: they're still in the backup.)</p></div></details>
     <details><summary>Is this made by M-VAVE?</summary><div><p>No. It's an unofficial, free, open-source community project, built on the recovery steps people worked out on r/MVaveFM1. Use it at your own risk.</p></div></details>
-    <details><summary>Why doesn't the USB fix work on a Mac?</summary><div><p>The helper program that talks to the chip's rescue mode has no Mac version. Use any Windows PC or a Raspberry Pi, or use the Transporter route, which works on a Mac.</p></div></details>
+    <details><summary>Does it work on a Mac?</summary><div><p>Yes, since November 2026. On a Mac the tool needs your password (<code class="inline">sudo</code>), because only an administrator can take the FM-1 away from macOS's disk driver. M-Flasher needs the same. Start the fix soon after the FM-1 enters rescue mode: macOS lets it slip back out after about half a minute. The USB fix has a one-line command that handles that.</p></div></details>
     <details><summary>Windows asked me to format a disk. What do I do?</summary><div><p>Click <strong>Cancel</strong>. That "disk" is the FM-1's rescue mode. Never format it.</p></div></details>
     <details><summary>The tool says "the two backup reads DIFFER"</summary><div><p>Nothing was written. The USB connection isn't reliable: use another data cable, another USB port, and plug the FM-1 straight into the computer, not into a hub.</p></div></details>
     <details><summary>The tool says the firmware is "already" there, but it's still black</summary><div><p>Then the firmware isn't the problem. The usual causes are the <button class="term" data-term="starter">bootloader</button> (see the <a href="#guides" data-goto="starter">Bootloader fix</a>) or leftovers from a custom firmware. Ask in the community and attach the folder from <code class="inline">backups</code>.</p></div></details>
