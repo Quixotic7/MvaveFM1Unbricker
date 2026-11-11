@@ -64,10 +64,8 @@ how the author's own unit came back on 2026-10-09 after an interrupted update.
 installed with M-Flasher that does not start)? `restore` never writes the head, but
 [`full-restore`](#full-restore-everything-boot-head-included) does: from the official package
 (stock bootloader + firmware) or from a full backup. It needs the unit to show up as
-`WL82 UBOOT1.00`, and Windows or Linux. The Transporter route cannot write the head: its firmware
-refuses it.
-Have a full 1 MiB flash backup but no Windows or Linux machine? The Transporter route can restore its
-application region (`--image`, on macOS too); see the Transporter commands below.
+`WL82 UBOOT1.00` (Windows, Linux or macOS). The Transporter route cannot write the head: its
+firmware refuses it.
 
 ## What it does
 
@@ -158,13 +156,30 @@ dump, to rehearse the whole flow without hardware. Exit codes as above.
 - Python 3.9 or newer;
 - **Windows** 10/11, run from an **administrator** PowerShell; or
 - **Linux** (a Raspberry Pi works), run as root (`sudo`), with the `sg` driver loaded
-  (`sudo modprobe sg`);
+  (`sudo modprobe sg`); or
+- **macOS** 11 or newer (Apple silicon or Intel), run as root (`sudo`): see below;
 - internet access once, for `setup` (and git, optional);
 - the firmware package, e.g. the official `FM-1.fwsc` (next section).
 
-**macOS is not supported**: jl-uboot-tool has no macOS SCSI back end. `fm1_unbrick.py` says so
-and exits with code 2. Use any Windows PC or Linux machine, a Raspberry Pi is enough.
-`extract`, `softkey` and every `--dry-run` work on macOS.
+**macOS** (new in 1.4.0). macOS has no SCSI pass-through for a USB disk, so jl-uboot-tool has no
+macOS back end of its own. `fm1_macusb.py` is one: it takes the `WL82 UBOOT1.00` device from macOS's
+disk driver and speaks USB Mass Storage Bulk-Only Transport itself, through libusb (pyusb and the
+`libusb-package` wheel, which `setup` installs; no Homebrew needed). Everything above it is
+unchanged: jl-uboot-tool's protocol classes, the backups, the checks, the gates. Taking a device from
+the disk driver needs root, as for M-Flasher, so the commands that open the FM-1 run with `sudo`;
+`find` and `softkey` do not need it.
+
+The WL82 resets itself when its USB goes quiet for a few seconds: on Windows and Linux the disk
+driver keeps it busy, on macOS nothing does once the driver is detached. So `fm1_macusb.py` sends
+TEST UNIT READY whenever the line has been idle for a second (measured on hardware: without it the
+unit dropped after 10 s idle, for instance while you type `WRITE`; with it, it stayed 30 s and more).
+Before the tool has opened it, macOS's own driver also lets it go back to its firmware after about
+half a minute (M-Flasher reports the same): start soon. The easy way is one line that asks for the
+password first, then sends the soft key and starts the command at once (below).
+
+Tested on an FM-1 (flash `0x856014`) on an Apple-silicon Mac, 2026-11-10: `info`, `backup`,
+`restore` V15 (written and verified), then `full-restore --image` of the earlier backup, which put
+the unit back byte for byte.
 
 ## Getting the official V15 package
 
@@ -203,6 +218,24 @@ python3 -m venv .venv
 sudo modprobe sg
 sudo .venv/bin/python fm1_unbrick.py restore FM-1.fwsc
 ```
+
+### macOS (Terminal)
+
+```sh
+cd MvaveFM1Unbricker
+python3 -m venv .venv
+.venv/bin/python fm1_unbrick.py setup
+sudo .venv/bin/python fm1_unbrick.py restore FM-1.fwsc
+```
+
+If the FM-1 still runs a firmware that answers the soft key (stock, Felucca family), let the tool put
+it into ROM boot mode and start right away:
+
+```sh
+sudo -v && .venv/bin/python fm1_unbrick.py softkey --yes && sudo .venv/bin/python fm1_unbrick.py restore FM-1.fwsc
+```
+
+If macOS says the disk is not readable, click **Ignore** (never Initialize).
 
 Type `WRITE` when asked. When it says **Done**: unplug USB, switch the FM-1 off, wait 5 seconds,
 switch it on. Keep the folder in `backups/`: if you used Felucca or ChoralRoot, your on-device
@@ -265,8 +298,7 @@ python fm1_unbrick.py full-restore FM-1.fwsc                # write it (type FUL
 python fm1_unbrick.py full-restore --image my-backup.bin    # or: everything from a full backup
 ```
 
-(Windows: `py` in an administrator PowerShell; Linux: `sudo .venv/bin/python`. Not on macOS:
-the USB route has no macOS back end, and the Transporter refuses the head.)
+(Windows: `py` in an administrator PowerShell; Linux and macOS: `sudo .venv/bin/python`.)
 
 - **From the package** (`FM-1.fwsc`): writes its whole flash image from `0x0`: for V15
   `0x0..0x92FFF` (the stock V15 bootloader and firmware), for V16 `0x0..0xA8FFF` (V16's own,
@@ -308,8 +340,9 @@ settings, and the presets come out corrupted.
 
 1. First try stock's own **System > Reset Patches**.
 2. If that does not help: `python fm1_unbrick.py softkey` (any OS, the FM-1 on its normal
-   screen) drops the unit into ROM boot mode. It stays there while powered, so on a Mac move the
-   cable to a Windows or Linux machine (the step below needs one).
+   screen) drops the unit into ROM boot mode. On a Mac, start the next step at once (it leaves
+   ROM boot mode after about half a minute): `sudo -v && .venv/bin/python fm1_unbrick.py softkey
+   --yes && sudo .venv/bin/python fm1_unbrick.py repair-settings --factory DUMP.bin`.
 3. `python fm1_unbrick.py repair-settings --factory DUMP.bin` (administrator PowerShell / sudo).
    It takes the usual double-read backup, then makes `0x93000..0xE8FFF` and `0xFC000..0xFEFFF`
    look like a factory unit: the factory settings sector `0x93000` from `DUMP.bin`, everything

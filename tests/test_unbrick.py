@@ -19,6 +19,7 @@ import subprocess
 import sys
 import struct
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -786,7 +787,7 @@ class SoftkeyTests(Workdir):
         self.assertEqual(midi.sent, [fu.HS_QUERY, bytes.fromhex("F0 22 24 35 7D F7")])
         self.assertTrue(midi.closed)
         self.assertIn("FM-1_015", self.out.getvalue())
-        self.assertIn("move the cable to a Windows or Linux machine", self.out.getvalue())
+        self.assertIn("move the cable to a Windows, Linux or macOS machine", self.out.getvalue())
 
     def test_port_count_refusals(self):
         for ports in ([], ["IAC Driver Bus 1"], ["FM-1", "FM-1 #2"]):
@@ -895,13 +896,294 @@ class FinderTests(Workdir):
             with self.assertRaises(fu.SafetyError):
                 fu.select_device("C:", [])
 
-    def test_macos_unsupported(self):
-        with mock.patch.object(fu.sys, "platform", "darwin"):
+    def test_other_os_unsupported(self):
+        with mock.patch.object(fu.sys, "platform", "sunos5"):
             for cmd in (["find"], ["info"], ["backup", "bk"]):
                 self.assertEqual(fu.main(cmd), 2)
-            self.assertIn("not supported: jl-uboot-tool has no macOS SCSI back end",
-                          self.out.getvalue())
+            self.assertIn("not supported on this system", self.out.getvalue())
             self.assertEqual(fu.main(["info", "--dry-run"]), 0)
+
+    def test_macos_device_paths(self):
+        with mock.patch.object(fu.sys, "platform", "darwin"):
+            one = [{"path": "usb:2:7", "description": "WL82 UBOOT1.00"}]
+            self.assertEqual(fu.select_device(None, one), "usb:2:7")
+            self.assertEqual(fu.select_device("usb:2:7", one), "usb:2:7")
+            for bad in ("/dev/disk4", "usb:2", "2:7"):
+                with self.assertRaises(fu.SafetyError):
+                    fu.select_device(bad, one)
+            with mock.patch.object(fu.os, "geteuid", return_value=501, create=True):
+                with self.assertRaisesRegex(fu.UnbrickError, "sudo"):
+                    fu.check_privileges("usb:2:7")
+            with mock.patch.object(fu.os, "geteuid", return_value=0, create=True):
+                fu.check_privileges("usb:2:7")
+
+
+# --------------------------------------------------------------------------
+# macOS: USB Bulk-Only Transport (fm1_macusb) over a fake USB device
+# --------------------------------------------------------------------------
+
+import fm1_macusb as mu  # noqa: E402
+
+
+class FakeUsbError(Exception):
+    def __init__(self, msg, code=None):
+        super().__init__(msg)
+        self.errno = code
+
+
+class FakeUsbModule:
+    """Just enough of pyusb (usb.core / usb.util) for fm1_macusb."""
+
+    def __init__(self, devices=()):
+        self.devices = list(devices)
+        self.core = types.SimpleNamespace(USBError=FakeUsbError, find=self._find)
+        self.util = types.SimpleNamespace(claim_interface=self._claim,
+                                          release_interface=self._release,
+                                          dispose_resources=lambda d: None)
+
+    def _find(self, find_all=False, idVendor=None, idProduct=None, bus=None, address=None,
+              backend=None):
+        hits = [d for d in self.devices if (d.vid, d.pid) == (idVendor, idProduct)
+                and bus in (None, d.bus) and address in (None, d.address)]
+        return hits if find_all else (hits[0] if hits else None)
+
+    def _claim(self, dev, n):
+        if dev.kernel_attached:
+            raise FakeUsbError("Resource busy", 16)
+        dev.claimed = True
+
+    def _release(self, dev, n):
+        dev.claimed = False
+
+
+class FakeEp:
+    def __init__(self, dev, addr):
+        self.dev, self.bEndpointAddress, self.bmAttributes = dev, addr, 2
+
+    def write(self, data, timeout=None):
+        return self.dev.bulk_out(bytes(data))
+
+    def read(self, n, timeout=None):
+        return self.dev.bulk_in(n)
+
+
+class FakeBotDevice:
+    """A WL82 UBOOT1.00 USB disk: parses CBWs, runs the CDB on a MockScsi-like
+    `target` (execute(cdb, data_out, data_in)), answers with data and a CSW."""
+
+    vid, pid = mu.VID, mu.PID
+
+    def __init__(self, target, bus=2, address=7, root=True, scsi_exc=Exception):
+        self.target, self.bus, self.address, self.root = target, bus, address, root
+        self.scsi_exc = scsi_exc
+        self.kernel_attached = True
+        self.claimed = False
+        self.pending = None       # (tag, length, direction, cdb) waiting for data out
+        self.outq = bytearray()
+        self.cbws = []
+        self.stall_next_in = False
+        self.fail_stall = False
+        self.bad_tag = False
+        ep_out, ep_in = FakeEp(self, 0x01), FakeEp(self, 0x81)
+        intf = types.SimpleNamespace(bInterfaceClass=8, bInterfaceNumber=0)
+        self.intf = _Iterable(intf, [ep_out, ep_in])
+        self.cfg = [self.intf]
+
+    def get_active_configuration(self):
+        return self.cfg
+
+    def is_kernel_driver_active(self, n):
+        return self.kernel_attached
+
+    def detach_kernel_driver(self, n):
+        if not self.root:
+            raise FakeUsbError("Access denied (insufficient permissions)", 13)
+        self.kernel_attached = False
+
+    def clear_halt(self, ep):
+        pass
+
+    def ctrl_transfer(self, *a):
+        self.pending = None
+        self.outq.clear()
+
+    def _run(self, cdb, data_out, length):
+        data_in = bytearray(length) if length and data_out is None else None
+        try:
+            self.target.execute(cdb, data_out, data_in)
+            status = 0
+        except self.scsi_exc:
+            status = 1
+            data_in = None
+        return data_in, status
+
+    def _queue(self, tag, data_in, status, length):
+        if data_in is not None:
+            self.outq += data_in
+        elif length:
+            self.fail_stall = True                    # a failed data-in command stalls bulk IN
+        tag = tag + 1 if self.bad_tag else tag
+        self.outq += mu.CSW_SIG + struct.pack("<IIB", tag, 0, status)
+
+    def bulk_out(self, data):
+        if self.pending is not None:
+            tag, length, cdb = self.pending
+            self.pending = None
+            data_in, status = self._run(cdb, data, 0)
+            self._queue(tag, None, status, 0)
+            return len(data)
+        assert data[:4] == mu.CBW_SIG and len(data) == 31
+        tag, length, flags, lun, cblen = struct.unpack_from("<IIBBB", data, 4)
+        cdb = data[15:15 + cblen]
+        self.cbws.append(bytes(cdb))
+        if length and not flags & 0x80:
+            self.pending = (tag, length, cdb)
+            return len(data)
+        data_in, status = self._run(cdb, None, length)
+        if status == 0 and cdb[0] == 0x03:
+            data_in = bytearray(b"\x70\0\x05" + bytes(15))
+        self._queue(tag, data_in if length else None, status, length)
+        return len(data)
+
+    def bulk_in(self, n):
+        if self.fail_stall:
+            self.fail_stall = False
+            raise FakeUsbError("Pipe error", 32)
+        if self.stall_next_in:
+            self.stall_next_in = False
+            del self.outq[:n]
+            raise FakeUsbError("Pipe error", 32)
+        chunk = bytes(self.outq[:n])
+        del self.outq[:n]
+        return chunk
+
+
+class _Iterable:
+    def __init__(self, ns, items):
+        self.__dict__.update(ns.__dict__)
+        self._items = items
+
+    def __iter__(self):
+        return iter(self._items)
+
+
+class EchoTarget:
+    """A tiny SCSI target: INQUIRY, a data-in read, a data-out write, a failing command."""
+
+    def __init__(self):
+        self.written = None
+
+    def execute(self, cdb, data_out, data_in):
+        if cdb[0] == 0x12:
+            data_in[8:16] = b"WL82    "
+            data_in[16:32] = b"UBOOT1.00       "
+        elif cdb[0] == 0xFD:
+            data_in[:] = bytes(i & 0xFF for i in range(len(data_in)))
+        elif cdb[0] == 0xFB:
+            self.written = bytes(data_out)
+        elif cdb[0] == 0x03:
+            pass
+        else:
+            raise KeyError("unsupported")
+
+
+class MacUsbTests(unittest.TestCase):
+
+    def open(self, target=None, **kw):
+        dev = FakeBotDevice(target or EchoTarget(), scsi_exc=KeyError, **kw)
+        usb = FakeUsbModule([dev])
+        return mu.BotScsiDev("usb:2:7", RuntimeError, usb=usb, be=object(), keepalive=0), dev, usb
+
+    def test_find_lists_wl82_devices(self):
+        usb = FakeUsbModule([FakeBotDevice(EchoTarget(), bus=1, address=4)])
+        self.assertEqual([c["path"] for c in mu.find(be=object(), usb=usb)], ["usb:1:4"])
+
+    def test_open_takes_device_from_the_disk_driver(self):
+        scsi, dev, usb = self.open()
+        self.assertFalse(dev.kernel_attached)
+        self.assertTrue(dev.claimed)
+        scsi.close()
+        self.assertFalse(dev.claimed)
+
+    def test_without_root_permission_error(self):
+        dev = FakeBotDevice(EchoTarget(), root=False)
+        with self.assertRaises(PermissionError):
+            mu.BotScsiDev("usb:2:7", RuntimeError, usb=FakeUsbModule([dev]), be=object(),
+                          keepalive=0)
+
+    def test_bad_paths_and_missing_device(self):
+        usb = FakeUsbModule([])
+        with self.assertRaises(mu.MacUsbError):
+            mu.BotScsiDev("/dev/disk4", RuntimeError, usb=usb, be=object())
+        with self.assertRaises(OSError):
+            mu.BotScsiDev("usb:2:7", RuntimeError, usb=usb, be=object())
+
+    def test_inquiry_read_write(self):
+        scsi, dev, usb = self.open()
+        inq = bytearray(36)
+        scsi.execute(b"\x12\x00\x00\x00\x24\x00", None, inq)
+        self.assertEqual(fu.scsi_inquiry(scsi)[:2], ("WL82", "UBOOT1.00"))
+        buf = bytearray(512)
+        scsi.execute(bytes([0xFD]) + bytes(15), None, buf)
+        self.assertEqual(bytes(buf), bytes(range(256)) * 2)
+        scsi.execute(bytes([0xFB]) + bytes(15), b"abc" * 100, None)
+        self.assertEqual(dev.target.written, b"abc" * 100)
+        self.assertEqual(len(dev.cbws), 4)
+        self.assertEqual(scsi.tag, 4)
+
+    def test_failed_command_raises_with_sense(self):
+        scsi, dev, usb = self.open()
+        with self.assertRaisesRegex(RuntimeError, "CSW status 1"):
+            scsi.execute(bytes([0x55]) + bytes(15), None, bytearray(4))
+        self.assertEqual(dev.cbws[-1][0], 0x03)       # REQUEST SENSE followed
+
+    def test_keepalive_while_idle(self):
+        dev = FakeBotDevice(EchoTarget(), scsi_exc=KeyError)
+        scsi = mu.BotScsiDev("usb:2:7", RuntimeError, usb=FakeUsbModule([dev]), be=object(),
+                             keepalive=0.05)
+        time.sleep(0.4)
+        self.assertGreaterEqual(dev.cbws.count(bytes(6)), 2)     # TEST UNIT READY while idle
+        buf = bytearray(36)
+        scsi.execute(b"\x12\x00\x00\x00\x24\x00", None, buf)  # commands still line up
+        self.assertEqual(buf[8:12], b"WL82")
+        scsi.close()
+        n = len(dev.cbws)
+        time.sleep(0.2)
+        self.assertEqual(len(dev.cbws), n)                       # stops with close()
+
+    def test_stall_and_bad_tag(self):
+        scsi, dev, usb = self.open()
+        dev.stall_next_in = True                  # data phase stalled: the CSW still comes,
+        buf = bytearray(16)                       # in step (a short transfer, as with SG_IO)
+        scsi.execute(bytes([0xFD]) + bytes(15), None, buf)
+        self.assertEqual(buf, bytearray(16))
+        dev.bad_tag = True
+        with self.assertRaisesRegex(RuntimeError, "tag"):
+            scsi.execute(b"\x12\x00\x00\x00\x24\x00", None, bytearray(36))
+
+
+class MacProtocolTests(Workdir):
+    """jl-uboot-tool's real classes, over fm1_macusb's BOT, over a fake USB device."""
+
+    def test_restore_over_bot(self):
+        jl = _load_jl_or_skip()
+        blob = (JLUB_DIR / fu.WL82_LOADER_REL).read_bytes()
+        m = fu.MockUboot()
+        target = MockScsi(jl, m, blob)
+        dev = FakeBotDevice(target, scsi_exc=jl.SCSIException)
+        scsi = mu.BotScsiDev("usb:2:7", jl.SCSIException, usb=FakeUsbModule([dev]), be=object(),
+                             keepalive=0.05)
+        fdev = fu.open_real_device("usb:2:7", jl, scsi=scsi)
+        self.assertTrue(target.loader_running)
+        self.assertEqual((fdev.chip_key(), fdev.flash_id()), (0x980F, 0x856014))
+        path, image = self.package()
+        before = bytes(m.flash)
+        self.assertEqual(fu.main(["restore", str(path), "--yes"], device=fdev), 0,
+                         self.out.getvalue())
+        self.assertEqual(m.flash[0x4000:0x93000], image[0x4000:0x93000])
+        self.assertEqual(m.flash[:0x4000], before[:0x4000])
+        self.assertEqual(m.flash[0x93000:], before[0x93000:])
+        self.assertFalse(dev.claimed)                 # closed after the run
 
 
 # --------------------------------------------------------------------------

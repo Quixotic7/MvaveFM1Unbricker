@@ -54,7 +54,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-TOOL_VERSION = "1.3.0"
+TOOL_VERSION = "1.4.0"
 
 # --------------------------------------------------------------------------
 # Flash layout of the FM-1 (1 MiB SPI NOR flash)
@@ -148,8 +148,8 @@ LOADER_TARGET_SPI_NOR = 1      # jl-uboot-tool's default loader argument
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_JL_DIR = SCRIPT_DIR / "jl-uboot-tool"
 
-MACOS_MESSAGE = ("not supported: jl-uboot-tool has no macOS SCSI back end; "
-                 "use a Windows or Linux machine (a Raspberry Pi works)")
+MACOS_MESSAGE = ("not supported on this system: use Windows, Linux (a Raspberry Pi works) "
+                 "or macOS")
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -193,7 +193,15 @@ def unique_path(directory: Path, stem: str, suffix: str) -> Path:
 
 
 def platform_supported() -> bool:
-    return sys.platform == "win32" or sys.platform.startswith("linux")
+    return sys.platform in ("win32", "darwin") or sys.platform.startswith("linux")
+
+
+def _macusb():
+    """fm1_macusb (macOS: USB Bulk-Only Transport through libusb), next to this script."""
+    if str(SCRIPT_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPT_DIR))
+    import fm1_macusb
+    return fm1_macusb
 
 
 class Progress:
@@ -516,6 +524,12 @@ def find_devices():
             log.info("No /sys/class/scsi_generic: load the SCSI generic driver with "
                      "`sudo modprobe sg` and try again.")
         return scan_linux_sysfs()
+    if sys.platform == "darwin":
+        mu = _macusb()
+        try:
+            return mu.find()
+        except mu.MacUsbError as e:
+            raise UnbrickError(str(e))
     raise UnbrickError(MACOS_MESSAGE, EXIT_UNSUPPORTED)
 
 
@@ -526,6 +540,8 @@ def select_device(explicit, candidates, i_know=False):
             raise SafetyError("--device must look like \\\\.\\PhysicalDriveN on Windows")
         if sys.platform.startswith("linux") and not LINUX_PATH_RE.match(explicit):
             raise SafetyError("--device must look like /dev/sgN on Linux")
+        if sys.platform == "darwin" and not re.match(r"^usb:\d+:\d+$", explicit):
+            raise SafetyError("--device must look like usb:BUS:ADDRESS on macOS (see `find`)")
         if candidates is not None and explicit not in [c["path"] for c in candidates]:
             if not i_know:
                 raise SafetyError(
@@ -537,7 +553,8 @@ def select_device(explicit, candidates, i_know=False):
         raise UnbrickError(
             "No %s device found. Check: the FM-1 is switched on and plugged in directly with "
             "a data cable; it shows a black screen; on Windows run from an administrator "
-            "PowerShell; on Linux run with sudo (and `sudo modprobe sg`). If it never appears "
+            "PowerShell; on Linux run with sudo (and `sudo modprobe sg`); on macOS run with sudo "
+            "soon after plugging it in. If it never appears "
             "as %s, see the FM-1 Transporter (README)." % (DEVICE_MODEL, DEVICE_MODEL))
     if len(candidates) > 1:
         listing = "\n".join("  %s  %s" % (c["path"], c["description"]) for c in candidates)
@@ -787,6 +804,12 @@ def jlub_commit(jl_dir: Path):
         res = _git("-C", str(jl_dir), "rev-parse", "HEAD")
         if res.returncode == 0:
             return res.stdout.strip()
+    if (jl_dir / ".git").is_dir():
+        # git refuses a checkout owned by another user ("dubious ownership"), which is
+        # what sudo makes of the user's own checkout: read the detached HEAD directly.
+        head = _read_attr(jl_dir / ".git" / "HEAD")
+        if re.fullmatch(r"[0-9a-f]{40}", head):
+            return head
     marker = jl_dir / JLUB_MARKER
     if marker.is_file():
         return marker.read_text().strip()
@@ -867,10 +890,31 @@ def cmd_setup(args):
         if res.returncode != 0:
             raise UnbrickError("pip install failed (exit %d)" % res.returncode)
     install_rtmidi(args)
+    install_macusb(args)
     if not platform_supported():
         log.info("Note: %s", MACOS_MESSAGE)
     log.info("Setup complete.")
     return EXIT_OK
+
+
+MACUSB_REQUIREMENTS = ["pyusb", "libusb-package"]
+
+
+def install_macusb(args):
+    """macOS: pyusb and a bundled libusb, for fm1_macusb (the USB transport)."""
+    if sys.platform != "darwin":
+        return
+    pip = [sys.executable, "-m", "pip", "install"] + MACUSB_REQUIREMENTS
+    if args.no_pip:
+        log.info("Skipping pip (--no-pip). macOS also needs: %s", " ".join(MACUSB_REQUIREMENTS))
+    elif args.dry_run:
+        log.info("DRY RUN: would run %s", " ".join(pip))
+    else:
+        log.info("Installing the macOS USB transport's requirements: %s", " ".join(pip))
+        res = subprocess.run(pip)
+        if res.returncode != 0:
+            raise UnbrickError("pip install %s failed (exit %d)"
+                               % (" ".join(MACUSB_REQUIREMENTS), res.returncode))
 
 
 def install_rtmidi(args):
@@ -895,6 +939,21 @@ def load_jlub(jl_dir: Path):
     path = str(Path(jl_dir).resolve())
     if path not in sys.path:
         sys.path.insert(0, path)
+    if sys.platform == "darwin" and "scsiio" not in sys.modules:
+        # jl-uboot-tool's scsiio package refuses to import on macOS (it has no back end
+        # here) and jltech.uboot imports it: give jltech the package without that check.
+        # Its SCSIException is the real one; the transport is fm1_macusb's.
+        import importlib.util
+        pkg = types.ModuleType("scsiio")
+        pkg.__path__ = [str(Path(path) / "scsiio")]
+        spec = importlib.util.spec_from_file_location("scsiio.common",
+                                                      str(Path(path) / "scsiio" / "common.py"))
+        if spec is not None and spec.loader is not None:
+            common = importlib.util.module_from_spec(spec)
+            sys.modules["scsiio"], sys.modules["scsiio.common"] = pkg, common
+            spec.loader.exec_module(common)
+            pkg.common = common
+            pkg.SCSIDev = None
     try:
         import yaml
         from jltech.uboot import JL_UBOOT, JL_LoaderV2
@@ -903,10 +962,16 @@ def load_jlub(jl_dir: Path):
     except ImportError as e:
         raise UnbrickError("cannot import jl-uboot-tool (%s); run `python fm1_unbrick.py "
                            "setup`" % e)
-    try:
-        from scsiio import SCSIDev
-    except ImportError:
-        SCSIDev = None
+    if sys.platform == "darwin":
+        mu = _macusb()
+
+        def SCSIDev(p):
+            return mu.BotScsiDev(p, SCSIException)
+    else:
+        try:
+            from scsiio import SCSIDev
+        except ImportError:
+            SCSIDev = None
     return types.SimpleNamespace(yaml=yaml, JL_UBOOT=JL_UBOOT, JL_LoaderV2=JL_LoaderV2,
                                  cipher_bytes=cipher_bytes, jl_crc_cipher=jl_crc_cipher,
                                  SCSIException=SCSIException, SCSIDev=SCSIDev,
@@ -1036,11 +1101,13 @@ def open_real_device(path, jl, scsi=None, wait=10.0) -> Fm1Device:
                 break
             except PermissionError:
                 raise UnbrickError("permission denied opening %s: run from an administrator "
-                                   "PowerShell (Windows) or with sudo (Linux)" % path)
+                                   "PowerShell (Windows) or with sudo (Linux, macOS)" % path)
             except OSError as e:
                 if time.monotonic() > deadline:
                     raise UnbrickError("cannot open %s: %s" % (path, e))
                 time.sleep(0.5)
+            except Exception as e:     # fm1_macusb.MacUsbError: no libusb, no interface
+                raise UnbrickError("cannot open %s: %s" % (path, e))
     try:
         vendor, product, rev = scsi_inquiry(scsi)
         log.info("Device      %s: %s %s (%s)", path, vendor, product, rev)
@@ -1095,6 +1162,10 @@ def check_privileges(path):
     elif sys.platform.startswith("linux") and os.path.exists(path):
         if not os.access(path, os.R_OK | os.W_OK):
             raise UnbrickError("no read/write access to %s: run with sudo" % path)
+    elif sys.platform == "darwin" and os.geteuid() != 0:
+        raise UnbrickError("on macOS only an administrator can take the FM-1 from the disk "
+                           "driver: run the same command with sudo in front (for example "
+                           "`sudo .venv/bin/python fm1_unbrick.py ...`)")
 
 
 def connect(args) -> Fm1Device:
@@ -2332,10 +2403,9 @@ def cmd_softkey(args, midi=None):
                  DEVICE_MODEL)
         return EXIT_OK
     if not platform_supported():
-        log.info("The FM-1 should now be in ROM boot mode (dark screen, USB disk %s). This Mac "
-                 "cannot continue (jl-uboot-tool has no macOS SCSI back end): move the cable to a "
-                 "Windows or Linux machine; the FM-1 stays in ROM boot mode while it is powered."
-                 % DEVICE_MODEL)
+        log.info("The FM-1 should now be in ROM boot mode (dark screen, USB disk %s). This "
+                 "computer cannot continue: move the cable to a Windows, Linux or macOS machine; "
+                 "the FM-1 stays in ROM boot mode while it is powered." % DEVICE_MODEL)
         return EXIT_OK
     log.info("Waiting up to %d s for the %s disk", SOFT_KEY_WAIT, DEVICE_MODEL)
     found = wait_for_uboot()
@@ -2343,7 +2413,8 @@ def cmd_softkey(args, midi=None):
         log.info("Found       %s  %s", c["path"], c["description"])
     if found:
         log.info("The FM-1 is in ROM boot mode: run repair-settings or restore now (Windows: an "
-                 "administrator PowerShell; Linux: sudo).")
+                 "administrator PowerShell; Linux: sudo; macOS: sudo, within about half a minute, "
+                 "before macOS's disk driver lets it go back to its firmware).")
         return EXIT_OK
     log.error("No %s disk appeared within %d s. The FM-1 may still be in ROM boot mode (dark "
               "screen): on Windows run `find` from an administrator PowerShell, on Linux with "
