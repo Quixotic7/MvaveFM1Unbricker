@@ -495,19 +495,21 @@
     b.addEventListener("click", function () {
       var text = $("pre", block).textContent;
       var done = function () { b.textContent = "Copied ✓"; b.classList.add("ok"); setTimeout(function () { b.textContent = "Copy"; b.classList.remove("ok"); }, 1600); };
+      var manual = function () {
+        // No clipboard access: select the command so it can be copied by hand.
+        var r = document.createRange();
+        r.selectNodeContents($("pre", block));
+        var sel = window.getSelection();
+        sel.removeAllRanges(); sel.addRange(r);
+        b.textContent = /Mac/.test(navigator.platform) ? "Press ⌘C" : "Press Ctrl+C";
+        setTimeout(function () { b.textContent = "Copy"; }, 2400);
+      };
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done(); });
-      } else { fallbackCopy(text); done(); }
+        navigator.clipboard.writeText(text).then(done, manual);
+      } else { manual(); }
     });
     block.appendChild(b);
   });
-  function fallbackCopy(text) {
-    var ta = document.createElement("textarea");
-    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
-    document.body.appendChild(ta); ta.select();
-    try { document.execCommand("copy"); } catch (e) { /* ignore */ }
-    ta.remove();
-  }
 
   // Links that open a guide (anywhere on the page, including ones added later).
   document.addEventListener("click", function (e) {

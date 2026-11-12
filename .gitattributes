@@ -1,0 +1,2 @@
+# The website (GitHub Pages) is not part of the tool: keep it out of "Download ZIP" and release archives.
+/docs export-ignore
