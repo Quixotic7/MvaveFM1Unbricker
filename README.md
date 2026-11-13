@@ -3,6 +3,8 @@
 
 # Alternative Guides
 
+If you have two FM-1's try this: https://jvitkauskas.github.io/m-unbricker/
+
 Another easy guide: https://github.com/GoodPerson42/FM1-Unbricking-For-Dummies
 
 Unbricking using a cardputer https://github.com/jvitkauskas/cardputer-synth-rescue
